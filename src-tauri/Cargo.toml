@@ -1,0 +1,48 @@
+[package]
+name = "playertwo"
+version = "0.1.0"
+description = "A fast, cross-platform game/app account switcher"
+authors = ["you"]
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "playertwo_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Core engine
+thiserror = "2"
+anyhow = "1"
+glob = "0.3"            # wildcard login-file matching
+dirs = "5"             # cross-platform known folders (AppData, etc.)
+sysinfo = "0.33"       # cross-platform process enumeration / kill
+regex = "1"            # file-content unique-id extraction
+
+# Structured logging (Rust equivalent of Python's structlog)
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-appender = "0.2"
+
+# Desktop-only Tauri plugins
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
+# Windows-only: registry access
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"

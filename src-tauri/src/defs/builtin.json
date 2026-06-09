@@ -1,0 +1,322 @@
+[
+  {
+    "id": "steam",
+    "name": "Steam",
+    "exe_default": "%ProgramFiles(x86)%\\Steam\\steam.exe",
+    "exe_locators": [
+      { "via": "url_protocol", "scheme": "steam" },
+      { "via": "registry", "key": "HKCU\\Software\\Valve\\Steam", "value": "SteamExe" },
+      { "via": "path", "path": "%ProgramFiles(x86)%\\Steam\\steam.exe" }
+    ],
+    "exes_to_end": ["steam.exe", "steamwebhelper.exe", "steamservice.exe"],
+    "login": [
+      { "kind": "file", "live": "%ProgramFiles(x86)%\\Steam\\config\\loginusers.vdf", "saved": "loginusers.vdf" },
+      { "kind": "registry", "key": "HKCU\\Software\\Valve\\Steam", "value": "AutoLoginUser", "saved": "AutoLoginUser" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "registry", "key": "HKCU\\Software\\Valve\\Steam", "value": "AutoLoginUser" }
+  },
+  {
+    "id": "epic",
+    "name": "Epic Games",
+    "exe_default": "%ProgramFiles%\\Epic Games\\Launcher\\Portal\\Binaries\\Win64\\EpicGamesLauncher.exe",
+    "exe_locators": [
+      { "via": "url_protocol", "scheme": "com.epicgames.launcher" },
+      { "via": "path", "path": "%ProgramFiles%\\Epic Games\\Launcher\\Portal\\Binaries\\Win64\\EpicGamesLauncher.exe" },
+      { "via": "path", "path": "%ProgramFiles(x86)%\\Epic Games\\Launcher\\Portal\\Binaries\\Win32\\EpicGamesLauncher.exe" }
+    ],
+    "exe_args": "-silent",
+    "exes_to_end": ["EpicGamesLauncher.exe", "EpicWebHelper.exe"],
+    "login": [
+      { "kind": "file", "live": "%LocalAppData%\\EpicGamesLauncher\\Saved\\Config\\WindowsEditor\\GameUserSettings.ini", "saved": "GameUserSettings.ini" },
+      { "kind": "registry", "key": "HKCU\\Software\\Epic Games\\Unreal Engine\\Identifiers", "value": "AccountId", "saved": "AccountId" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "registry", "key": "HKCU\\Software\\Epic Games\\Unreal Engine\\Identifiers", "value": "AccountId" }
+  },
+  {
+    "id": "gog",
+    "name": "GOG Galaxy",
+    "exe_default": "%ProgramFiles(x86)%\\GOG Galaxy\\GalaxyClient.exe",
+    "exes_to_end": ["GalaxyClient.exe", "GOG Galaxy Notifications Renderer.exe", "GalaxyClientService.exe", "GalaxyCommunication.exe"],
+    "login": [
+      { "kind": "file", "live": "%LocalAppData%\\GOG.com\\Galaxy\\Configuration\\config.json", "saved": "LocalAppData\\config.json" },
+      { "kind": "registry", "key": "HKCU\\Software\\GOG.com\\Galaxy\\settings", "value": "username", "saved": "username" },
+      { "kind": "registry", "key": "HKCU\\Software\\GOG.com\\Galaxy", "value": "refreshToken", "saved": "refreshToken" },
+      { "kind": "registry", "key": "HKCU\\Software\\GOG.com\\Galaxy\\settings", "value": "userId", "saved": "userId" },
+      { "kind": "file", "live": "%ProgramData%\\GOG.com\\Galaxy\\config.json", "saved": "ProgramData\\config.json" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "registry", "key": "HKCU\\Software\\GOG.com\\Galaxy\\settings", "value": "userId" }
+  },
+  {
+    "id": "discord",
+    "name": "Discord",
+    "exe_default": "%LocalAppData%\\Discord\\Update.exe",
+    "exe_args": "--processStart Discord.exe",
+    "exes_to_end": ["Discord.exe"],
+    "login": [
+      { "kind": "file", "live": "%AppData%\\discord\\settings.json", "saved": "settings.json" },
+      { "kind": "file", "live": "%AppData%\\discord\\Local Storage\\leveldb", "saved": "Local Storage\\leveldb\\" },
+      { "kind": "file", "live": "%AppData%\\discord\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%AppData%\\discord\\.acctswitch-id.instance" }
+  },
+  {
+    "id": "discord-canary",
+    "name": "Discord Canary",
+    "exe_default": "%LocalAppData%\\DiscordCanary\\Update.exe",
+    "exe_args": "--processStart DiscordCanary.exe",
+    "exes_to_end": ["DiscordCanary.exe"],
+    "login": [
+      { "kind": "file", "live": "%AppData%\\discordcanary\\settings.json", "saved": "settings.json" },
+      { "kind": "file", "live": "%AppData%\\discordcanary\\Local Storage\\leveldb", "saved": "Local Storage\\leveldb\\" },
+      { "kind": "file", "live": "%AppData%\\discordcanary\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%AppData%\\discordcanary\\.acctswitch-id.instance" }
+  },
+  {
+    "id": "discord-ptb",
+    "name": "Discord PTB",
+    "exe_default": "%LocalAppData%\\DiscordPTB\\Update.exe",
+    "exe_args": "--processStart DiscordPTB.exe",
+    "exes_to_end": ["DiscordPTB.exe"],
+    "login": [
+      { "kind": "file", "live": "%AppData%\\discordptb\\settings.json", "saved": "settings.json" },
+      { "kind": "file", "live": "%AppData%\\discordptb\\Local Storage\\leveldb", "saved": "Local Storage\\leveldb\\" },
+      { "kind": "file", "live": "%AppData%\\discordptb\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%AppData%\\discordptb\\.acctswitch-id.instance" }
+  },
+  {
+    "id": "eft",
+    "name": "Escape from Tarkov",
+    "exe_default": "C:\\Battlestate Games\\BsgLauncher\\BsgLauncher.exe",
+    "exes_to_end": ["EscapeFromTarkov.exe", "BsgLauncher.exe"],
+    "login": [
+      { "kind": "file", "live": "%AppData%\\Battlestate Games\\BsgLauncher\\settings", "saved": "settings" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "file_regex", "file": "%AppData%\\Battlestate Games\\BsgLauncher\\settings", "regex": "([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})" }
+  },
+  {
+    "id": "obs",
+    "name": "OBS Studio",
+    "exe_default": "%ProgramFiles%\\obs-studio\\bin\\64bit\\obs64.exe",
+    "exes_to_end": ["obs64.exe"],
+    "login": [
+      { "kind": "file", "live": "%AppData%\\obs-studio\\global.ini", "saved": "global.ini" },
+      { "kind": "file", "live": "%AppData%\\obs-studio\\basic\\*", "saved": "basic\\" },
+      { "kind": "file", "live": "%AppData%\\obs-studio\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%AppData%\\obs-studio\\.acctswitch-id.instance" }
+  },
+  {
+    "id": "riot",
+    "name": "Riot Games",
+    "exe_default": "C:\\Riot Games\\Riot Client\\RiotClientServices.exe",
+    "exes_to_end": ["LeagueClient.exe", "LoR.exe", "VALORANT.exe", "RiotClientServices.exe", "RiotClientUx.exe", "RiotClientUxRender.exe"],
+    "login": [
+      { "kind": "file", "live": "%LocalAppData%\\Riot Games\\Riot Client\\Data\\Cookies", "saved": "Cookies\\" },
+      { "kind": "file", "live": "%LocalAppData%\\Riot Games\\Riot Client\\Data\\RiotClientPrivateSettings.yaml", "saved": "RiotClientPrivateSettings.yaml" },
+      { "kind": "file", "live": "%LocalAppData%\\Riot Games\\Riot Client\\Config\\RiotClientSettings.yaml", "saved": "RiotClientSettings.yaml" },
+      { "kind": "file", "live": "%LocalAppData%\\Riot Games\\Riot Client\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%LocalAppData%\\Riot Games\\Riot Client\\.acctswitch-id.instance" }
+  },
+  {
+    "id": "origin",
+    "name": "Origin",
+    "exe_default": "%ProgramFiles(x86)%\\Origin\\Origin.exe",
+    "exes_to_end": ["Origin.exe", "OriginWebHelperService.exe"],
+    "login": [
+      { "kind": "file", "live": "%AppData%\\Origin\\local.xml", "saved": "AppData\\local.xml" },
+      { "kind": "file", "live": "%ProgramData%\\Origin\\local.xml", "saved": "ProgramData\\local.xml" },
+      { "kind": "file", "live": "%ProgramData%\\Origin\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%ProgramData%\\Origin\\.acctswitch-id.instance" }
+  },
+  {
+    "id": "ea",
+    "name": "EA Desktop",
+    "exe_default": "%ProgramFiles%\\Electronic Arts\\EA Desktop\\EA Desktop\\EADesktop.exe",
+    "exes_to_end": ["EADesktop.exe", "EABackgroundService.exe"],
+    "login": [
+      { "kind": "file", "live": "%LocalAppData%\\Electronic Arts\\EA Desktop\\user.ini", "saved": "user.ini" },
+      { "kind": "file", "live": "%LocalAppData%\\Electronic Arts\\EA Desktop\\telemetry.ini", "saved": "telemetry.ini" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "file_regex", "file": "%LocalAppData%\\Electronic Arts\\EA Desktop\\telemetry.ini", "regex": "=(.*)" }
+  },
+  {
+    "id": "geforce-now",
+    "name": "GeForce Now",
+    "exe_default": "%LocalAppData%\\NVIDIA Corporation\\GeForceNOW\\CEF\\GeForceNOW.exe",
+    "exes_to_end": ["GeForceNOW.exe", "GeForceNOWContainer.exe", "GeForceNOWReliabilityMonitor.exe"],
+    "login": [
+      { "kind": "file", "live": "%LocalAppData%\\NVIDIA Corporation\\GeForceNOW\\sharedstorage.json", "saved": "sharedstorage.json" },
+      { "kind": "file", "live": "%LocalAppData%\\NVIDIA Corporation\\GeForceNOW\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%LocalAppData%\\NVIDIA Corporation\\GeForceNOW\\.acctswitch-id.instance" }
+  },
+  {
+    "id": "ubisoft",
+    "name": "Ubisoft Connect",
+    "exe_default": "%ProgramFiles(x86)%\\Ubisoft\\Ubisoft Game launcher\\upc.exe",
+    "exes_to_end": ["upc.exe", "UplayService.exe", "UplayWebCore.exe"],
+    "login": [
+      { "kind": "file", "live": "%LocalAppData%\\Ubisoft Game Launcher\\ConnectSecureStorage.dat", "saved": "ConnectSecureStorage.dat" },
+      { "kind": "file", "live": "%LocalAppData%\\Ubisoft Game Launcher\\settings.yaml", "saved": "settings.yaml" },
+      { "kind": "file", "live": "%LocalAppData%\\Ubisoft Game Launcher\\user.dat", "saved": "user.dat" },
+      { "kind": "file", "live": "%LocalAppData%\\Ubisoft Game Launcher\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%LocalAppData%\\Ubisoft Game Launcher\\.acctswitch-id.instance" }
+  },
+  {
+    "id": "oculus",
+    "name": "Oculus",
+    "exe_default": "%ProgramFiles%\\Oculus\\Support\\oculus-client\\OculusClient.exe",
+    "exes_to_end": ["OculusClient.exe", "OculusDash.exe", "OVRRedit.exe", "OVRServer_x64.exe", "OVRServiceLauncher.exe"],
+    "login": [
+      { "kind": "file", "live": "%AppData%\\Oculus\\sessions", "saved": "AppData-OculusSessions\\" },
+      { "kind": "file", "live": "%AppData%\\OculusClient\\Local Storage\\leveldb", "saved": "Local Storage\\leveldb\\" },
+      { "kind": "file", "live": "%AppData%\\OculusClient\\Cookies", "saved": "Cookies" },
+      { "kind": "file", "live": "%AppData%\\Oculus\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%AppData%\\Oculus\\.acctswitch-id.instance" }
+  },
+  {
+    "id": "genshin",
+    "name": "Genshin Impact",
+    "exe_default": "%ProgramFiles%\\Genshin Impact\\Genshin Impact Game\\GenshinImpact.exe",
+    "exes_to_end": ["GenshinImpact.exe"],
+    "login": [
+      { "kind": "registry", "key": "HKCU\\Software\\miHoYo\\Genshin Impact", "value": "MIHOYOSDK_ADL_PROD_OVERSEA_h1158948810", "saved": "MIHOYOSDK_ADL_PROD_OVERSEA_h1158948810" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "registry", "key": "HKCU\\Software\\miHoYo\\Genshin Impact", "value": "MIHOYOSDK_ADL_PROD_OVERSEA_h1158948810" }
+  },
+  {
+    "id": "mtga",
+    "name": "Magic Arena",
+    "exe_default": "%ProgramFiles%\\Wizards of the Coast\\MTGA\\MTGALauncher\\MTGALauncher.exe",
+    "exes_to_end": ["MTGA.exe"],
+    "login": [
+      { "kind": "registry", "key": "HKCU\\SOFTWARE\\Wizards Of The Coast\\MTGA", "value": "LastLoginString_h2517025721", "saved": "LastLoginString_h2517025721" },
+      { "kind": "registry", "key": "HKCU\\SOFTWARE\\Wizards Of The Coast\\MTGA", "value": "RefreshToken_h992839947", "saved": "RefreshToken_h992839947" },
+      { "kind": "registry", "key": "HKCU\\SOFTWARE\\Wizards Of The Coast\\MTGA", "value": "RememberMe_h1678977314", "saved": "RememberMe_h1678977314" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "registry", "key": "HKCU\\SOFTWARE\\Wizards Of The Coast\\MTGA", "value": "LastLoginString_h2517025721" }
+  },
+  {
+    "id": "ps-remote-play",
+    "name": "PS Remote Play",
+    "exe_default": "%ProgramFiles(x86)%\\Sony\\PS Remote Play\\RemotePlay.exe",
+    "exes_to_end": ["RemotePlay.exe"],
+    "login": [
+      { "kind": "file", "live": "%LocalAppData%\\Sony Corporation\\PS Remote Play\\setting.cache", "saved": "setting.cache" },
+      { "kind": "file", "live": "%LocalAppData%\\Sony Corporation\\PS Remote Play\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%LocalAppData%\\Sony Corporation\\PS Remote Play\\.acctswitch-id.instance" }
+  },
+  {
+    "id": "albion",
+    "name": "Albion Online",
+    "exe_default": "%ProgramFiles(x86)%\\AlbionOnline\\launcher\\AlbionLauncher.exe",
+    "exes_to_end": ["AlbionLauncher.exe", "Albion-Online.exe"],
+    "login": [
+      { "kind": "registry", "key": "HKCU\\Software\\Sandbox Interactive GmbH\\Albion Online Client", "value": "LastUsedAccountId_h136571812", "saved": "LastUsedAccountId_h136571812" },
+      { "kind": "registry", "key": "HKCU\\Software\\Sandbox Interactive GmbH\\Albion Online Client", "value": "login.last_h1502067074", "saved": "login.last_h1502067074" },
+      { "kind": "registry", "key": "HKCU\\Software\\Sandbox Interactive GmbH\\Albion Online Client", "value": "login.hash_h1501923354", "saved": "login.hash_h1501923354" },
+      { "kind": "registry", "key": "HKCU\\Software\\Sandbox Interactive GmbH\\Albion Online Client", "value": "login.accountname_h1930415854", "saved": "login.accountname_h1930415854" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "registry", "key": "HKCU\\Software\\Sandbox Interactive GmbH\\Albion Online Client", "value": "LastUsedAccountId_h136571812" }
+  },
+  {
+    "id": "rockstar",
+    "name": "Rockstar",
+    "exe_default": "%ProgramFiles%\\Rockstar Games\\Launcher\\LauncherPatcher.exe",
+    "exes_to_end": ["LauncherPatcher.exe", "Launcher.exe", "RockstarErrorHandler.exe", "RockstarService.exe", "SocialClubHelper.exe"],
+    "login": [
+      { "kind": "file", "live": "%LocalAppData%\\Rockstar Games\\Launcher\\settings_user.dat", "saved": "settings_user.dat" },
+      { "kind": "file", "live": "%ProgramData%\\Rockstar Games\\Launcher\\settings_machine.dat", "saved": "settings_machine.dat" },
+      { "kind": "file", "live": "%ProgramData%\\Rockstar Games\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%ProgramData%\\Rockstar Games\\.acctswitch-id.instance" }
+  },
+  {
+    "id": "battlenet",
+    "name": "Battle.net",
+    "exe_default": "%ProgramFiles(x86)%\\Battle.net\\Battle.net.exe",
+    "exe_locators": [{ "via": "url_protocol", "scheme": "battlenet" }],
+    "exes_to_end": ["Battle.net.exe", "Battle.net", "BlizzardError.exe"],
+    "login": [
+      { "kind": "file", "live": "%AppData%\\Battle.net\\Battle.net.config", "saved": "Battle.net.config" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "json_field", "file": "%AppData%\\Battle.net\\Battle.net.config", "pointer": "/Client/SavedAccountNames" }
+  },
+  {
+    "id": "honkai-starrail",
+    "name": "Honkai: Star Rail",
+    "exe_default": "%ProgramFiles%\\Star Rail\\Games\\StarRail.exe",
+    "exes_to_end": ["StarRail.exe"],
+    "login": [
+      { "kind": "registry", "key": "HKCU\\Software\\Cognosphere\\Star Rail", "value": "MIHOYOSDK_ADL_PROD_OVERSEA_h1158948810", "saved": "MIHOYOSDK_ADL_PROD_OVERSEA_h1158948810" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "registry", "key": "HKCU\\Software\\Cognosphere\\Star Rail", "value": "MIHOYOSDK_ADL_PROD_OVERSEA_h1158948810" }
+  },
+  {
+    "id": "arena-breakout",
+    "name": "Arena Breakout: Infinite",
+    "exe_default": "C:\\Arena Breakout Infinite\\launcher\\arena_breakout_infinite_launcher.exe",
+    "exes_to_end": ["arena_breakout_infinite_launcher.exe"],
+    "login": [
+      { "kind": "file", "live": "%AppData%\\arena_breakout_infinite_launcher\\last_user.dat", "saved": "last_user.dat" },
+      { "kind": "file", "live": "%AppData%\\arena_breakout_infinite_launcher\\psd.dat", "saved": "psd.dat" },
+      { "kind": "file", "live": "%AppData%\\arena_breakout_infinite_launcher\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%AppData%\\arena_breakout_infinite_launcher\\.acctswitch-id.instance" }
+  },
+  {
+    "id": "delta-force",
+    "name": "Delta Force: Hawk Ops",
+    "exe_default": "C:\\Delta Force Hawk Ops\\launcher\\df_launcher_global.exe",
+    "exes_to_end": ["df_launcher_global.exe"],
+    "login": [
+      { "kind": "file", "live": "%AppData%\\df_launcher_global_30029601\\last_user.dat", "saved": "last_user.dat" },
+      { "kind": "file", "live": "%AppData%\\df_launcher_global_30029601\\psd.dat", "saved": "psd.dat" },
+      { "kind": "file", "live": "%AppData%\\df_launcher_global_30029601\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%AppData%\\df_launcher_global_30029601\\.acctswitch-id.instance" }
+  },
+  {
+    "id": "jagex",
+    "name": "Jagex",
+    "exe_default": "%ProgramFiles(x86)%\\jagex launcher\\JagexLauncher.exe",
+    "exes_to_end": ["JagexLauncher.exe"],
+    "login": [
+      { "kind": "file", "live": "%LocalAppData%\\jagex launcher\\settings.json", "saved": "settings.json" },
+      { "kind": "file", "live": "%LocalAppData%\\jagex launcher\\auth\\*", "saved": "auth\\" },
+      { "kind": "file", "live": "%LocalAppData%\\jagex launcher\\.acctswitch-id.instance", "saved": ".acctswitch-id.instance" }
+    ],
+    "clear": [],
+    "unique_id": { "type": "generated_file", "file": "%LocalAppData%\\jagex launcher\\.acctswitch-id.instance" }
+  }
+]
