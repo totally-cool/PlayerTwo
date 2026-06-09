@@ -49,6 +49,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "PlayerTwo ${{ github.ref_name }}"
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
