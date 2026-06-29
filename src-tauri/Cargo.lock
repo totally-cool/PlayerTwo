@@ -2667,7 +2667,6 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-process",
  "tauri-plugin-updater",
- "thiserror 2.0.18",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
