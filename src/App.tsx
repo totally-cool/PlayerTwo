@@ -285,11 +285,17 @@ export default function App() {
   const onSwitch = async (platformId: string, acc: Account) => {
     try {
       const out = await api.switchAccount(platformId, acc.id, settings?.auto_start ?? true);
+      // Flip the active highlight immediately. Re-detecting the live account can
+      // briefly lag (the launcher is relaunching and may rewrite files), so we
+      // trust the switch result here and let refreshAll() reconcile.
+      if (out.switched || out.already_active) {
+        setCurrentByPlatform((prev) => ({ ...prev, [platformId]: acc.id }));
+      }
       setToast({
         msg: out.already_active ? "Already active" : out.message || `Switched to ${acc.display_name}`,
         sev: out.already_active ? "info" : "success",
       });
-      refreshAll();
+      await refreshAll();
       if (settings?.minimize_after_switch) {
         try {
           await getCurrentWindow().minimize();
