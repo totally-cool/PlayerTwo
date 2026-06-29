@@ -4,7 +4,7 @@
 //! does its work, and returns plain serializable data / `Result<_, String>`.
 
 use crate::switcher::engine::{Engine, SwitchOutcome};
-use crate::switcher::model::{Account, PlatformDef, UniqueId};
+use crate::switcher::model::{Account, UniqueId};
 use crate::switcher::settings::Settings;
 use crate::switcher::store::Store;
 use crate::{defs, os};
@@ -46,17 +46,30 @@ fn engine_for(state: &AppState) -> Engine {
     Engine::new(os::host(), Store::new(dir))
 }
 
-/// Apply Epic's per-platform "launch silently" setting to the def's launch args.
-fn apply_epic_silent(state: &AppState, def: &mut PlatformDef) {
-    let dir = state.data_dir.lock().unwrap().clone();
-    let silent = Settings::load(&dir)
+/// Run blocking engine work off the UI thread. Switching kills processes, waits
+/// for them to exit (up to ~5s), and copies login files (possibly to a NAS) —
+/// doing that on Tauri's main thread freezes the window, so we hand it to the
+/// blocking pool and `await` the result.
+async fn run_engine<T, F>(dir: PathBuf, f: F) -> CmdResult<T>
+where
+    F: FnOnce(&Engine) -> CmdResult<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let engine = Engine::new(os::host(), Store::new(dir));
+        f(&engine)
+    })
+    .await
+    .map_err(|e| err(format!("background task failed: {e}")))?
+}
+
+/// Whether Epic should launch silently after switching (per-platform setting).
+fn epic_silent(dir: &std::path::Path) -> bool {
+    Settings::load(dir)
         .platforms
         .get("epic")
         .and_then(|p| p.silent)
-        .unwrap_or(true);
-    if !silent {
-        def.exe_args = None;
-    }
+        .unwrap_or(true)
 }
 
 fn now() -> u64 {
@@ -139,24 +152,29 @@ pub struct PlatformSummary {
 }
 
 #[tauri::command]
-pub fn list_platforms(state: tauri::State<AppState>) -> CmdResult<Vec<PlatformSummary>> {
-    let engine = engine_for(&state);
+pub async fn list_platforms(
+    state: tauri::State<'_, AppState>,
+) -> CmdResult<Vec<PlatformSummary>> {
     let dir = state.data_dir.lock().unwrap().clone();
-    let settings = Settings::load(&dir);
-    let mut out = Vec::new();
-    for def in defs::builtin() {
-        let count = engine.store().list_accounts(&def.id).map_err(err)?.len();
-        let detected = engine.is_installed(&def);
-        let enabled = settings.platform_enabled(&def.id, detected);
-        out.push(PlatformSummary {
-            id: def.id,
-            name: def.name,
-            account_count: count,
-            detected,
-            enabled,
-        });
-    }
-    Ok(out)
+    let settings_dir = dir.clone();
+    run_engine(dir, move |engine| {
+        let settings = Settings::load(&settings_dir);
+        let mut out = Vec::new();
+        for def in defs::builtin() {
+            let count = engine.store().list_accounts(&def.id).map_err(err)?.len();
+            let detected = engine.is_installed(&def);
+            let enabled = settings.platform_enabled(&def.id, detected);
+            out.push(PlatformSummary {
+                id: def.id,
+                name: def.name,
+                account_count: count,
+                detected,
+                enabled,
+            });
+        }
+        Ok(out)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -185,63 +203,79 @@ pub fn set_platform_enabled(
 }
 
 #[tauri::command]
-pub fn list_accounts(state: tauri::State<AppState>, platform: String) -> CmdResult<Vec<Account>> {
-    let engine = engine_for(&state);
-    if platform == "steam" {
-        // Accounts come live from Steam; overlay any saved name/note/image.
-        let overrides = engine.store().list_accounts("steam").unwrap_or_default();
-        let merged = engine
-            .steam_accounts()
-            .into_iter()
-            .map(|mut a| {
-                if let Some(o) = overrides.iter().find(|o| o.id == a.id) {
-                    a.display_name = o.display_name.clone();
-                    a.note = o.note.clone().or(a.note);
-                    a.image = o.image.clone();
-                }
-                a
-            })
-            .collect();
-        return Ok(merged);
-    }
-    engine.store().list_accounts(&platform).map_err(err)
+pub async fn list_accounts(
+    state: tauri::State<'_, AppState>,
+    platform: String,
+) -> CmdResult<Vec<Account>> {
+    let dir = state.data_dir.lock().unwrap().clone();
+    run_engine(dir, move |engine| {
+        if platform == "steam" {
+            // Accounts come live from Steam; overlay any saved name/note/image.
+            let overrides = engine.store().list_accounts("steam").unwrap_or_default();
+            let merged = engine
+                .steam_accounts()
+                .into_iter()
+                .map(|mut a| {
+                    if let Some(o) = overrides.iter().find(|o| o.id == a.id) {
+                        a.display_name = o.display_name.clone();
+                        a.note = o.note.clone().or(a.note);
+                        a.image = o.image.clone();
+                    }
+                    a
+                })
+                .collect();
+            return Ok(merged);
+        }
+        engine.store().list_accounts(&platform).map_err(err)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn switch_account(
-    state: tauri::State<AppState>,
+pub async fn switch_account(
+    state: tauri::State<'_, AppState>,
     platform: String,
     account_id: String,
     auto_start: bool,
 ) -> CmdResult<SwitchOutcome> {
     tracing::info!(platform = %platform, account = %account_id, "switch requested");
     let mut def = defs::by_id(&platform).ok_or_else(|| format!("unknown platform: {platform}"))?;
-    let engine = engine_for(&state);
-    if platform == "steam" {
-        return engine.switch_steam(&def, &account_id, auto_start).map_err(err);
+    let dir = state.data_dir.lock().unwrap().clone();
+    if platform == "epic" && !epic_silent(&dir) {
+        def.exe_args = None;
     }
-    if platform == "epic" {
-        apply_epic_silent(&state, &mut def);
-        return engine.switch_epic(&def, &account_id, auto_start).map_err(err);
-    }
-    engine.switch(&def, &account_id, auto_start).map_err(err)
+    run_engine(dir, move |engine| {
+        if platform == "steam" {
+            return engine.switch_steam(&def, &account_id, auto_start).map_err(err);
+        }
+        if platform == "epic" {
+            return engine.switch_epic(&def, &account_id, auto_start).map_err(err);
+        }
+        engine.switch(&def, &account_id, auto_start).map_err(err)
+    })
+    .await
 }
 
 /// The unique id of the account currently logged in on the system, if detectable.
 /// Used to highlight the active profile in the UI.
 #[tauri::command]
-pub fn current_account_id(
-    state: tauri::State<AppState>,
+pub async fn current_account_id(
+    state: tauri::State<'_, AppState>,
     platform: String,
 ) -> CmdResult<Option<String>> {
-    if platform == "steam" {
-        return Ok(engine_for(&state).steam_current());
-    }
-    if platform == "epic" {
-        return Ok(engine_for(&state).epic_current());
-    }
-    let def = defs::by_id(&platform).ok_or_else(|| format!("unknown platform: {platform}"))?;
-    engine_for(&state).current_id(&def).map_err(err)
+    let dir = state.data_dir.lock().unwrap().clone();
+    run_engine(dir, move |engine| {
+        if platform == "steam" {
+            return Ok(engine.steam_current());
+        }
+        if platform == "epic" {
+            return Ok(engine.epic_current());
+        }
+        let def =
+            defs::by_id(&platform).ok_or_else(|| format!("unknown platform: {platform}"))?;
+        engine.current_id(&def).map_err(err)
+    })
+    .await
 }
 
 /// Result of capturing the current login: either a freshly added account, or a
@@ -256,13 +290,14 @@ pub struct AddResult {
 /// If the detected account already exists, returns it with `exists: true` and
 /// does not overwrite — the caller should offer to rename instead.
 #[tauri::command]
-pub fn add_current_account(
-    state: tauri::State<AppState>,
+pub async fn add_current_account(
+    state: tauri::State<'_, AppState>,
     platform: String,
     display_name: String,
 ) -> CmdResult<AddResult> {
+    let dir = state.data_dir.lock().unwrap().clone();
+    run_engine(dir, move |engine| {
     let def = defs::by_id(&platform).ok_or_else(|| format!("unknown platform: {platform}"))?;
-    let engine = engine_for(&state);
 
     // Steam: accounts live in Steam itself; "import" just saves a name override
     // for the currently signed-in account.
@@ -380,25 +415,35 @@ pub fn add_current_account(
         exists: false,
         account,
     })
+    })
+    .await
 }
 
 /// Begin a new-account login: clear the current login and launch the platform so
 /// the user can sign into a different account, which they then capture via
 /// `add_current_account`.
 #[tauri::command]
-pub fn prepare_new_login(state: tauri::State<AppState>, platform: String) -> CmdResult<bool> {
+pub async fn prepare_new_login(
+    state: tauri::State<'_, AppState>,
+    platform: String,
+) -> CmdResult<bool> {
     let mut def = defs::by_id(&platform).ok_or_else(|| format!("unknown platform: {platform}"))?;
-    let engine = engine_for(&state);
-    if platform == "steam" {
-        // Steam manages its own account list; just open it so the user can use
-        // Steam's "Add account" — clearing files would wipe other accounts.
-        return engine.launch(&def, true).map_err(err);
+    let dir = state.data_dir.lock().unwrap().clone();
+    if platform == "epic" && !epic_silent(&dir) {
+        def.exe_args = None;
     }
-    if platform == "epic" {
-        apply_epic_silent(&state, &mut def);
-        return engine.epic_new_login(&def, true).map_err(err);
-    }
-    engine.begin_new_login(&def, true).map_err(err)
+    run_engine(dir, move |engine| {
+        if platform == "steam" {
+            // Steam manages its own account list; just open it so the user can use
+            // Steam's "Add account" — clearing files would wipe other accounts.
+            return engine.launch(&def, true).map_err(err);
+        }
+        if platform == "epic" {
+            return engine.epic_new_login(&def, true).map_err(err);
+        }
+        engine.begin_new_login(&def, true).map_err(err)
+    })
+    .await
 }
 
 /// Set a platform's "launch silently after switching" preference.
@@ -417,8 +462,9 @@ pub fn set_platform_silent(
 /// Refresh the saved login token for the currently-active account where the
 /// platform rotates tokens (currently Epic). Safe to call on startup.
 #[tauri::command]
-pub fn renew_active_tokens(state: tauri::State<AppState>) -> CmdResult<()> {
-    engine_for(&state).epic_renew().map_err(err)
+pub async fn renew_active_tokens(state: tauri::State<'_, AppState>) -> CmdResult<()> {
+    let dir = state.data_dir.lock().unwrap().clone();
+    run_engine(dir, move |engine| engine.epic_renew().map_err(err)).await
 }
 
 /// Edit an account's display name / note (id is immutable).
@@ -435,16 +481,20 @@ pub fn update_account(
 }
 
 #[tauri::command]
-pub fn forget_account(
-    state: tauri::State<AppState>,
+pub async fn forget_account(
+    state: tauri::State<'_, AppState>,
     platform: String,
     account_id: String,
 ) -> CmdResult<()> {
     tracing::info!(platform = %platform, account = %account_id, "forget account");
-    engine_for(&state)
-        .store()
-        .remove_account(&platform, &account_id)
-        .map_err(err)
+    let dir = state.data_dir.lock().unwrap().clone();
+    run_engine(dir, move |engine| {
+        engine
+            .store()
+            .remove_account(&platform, &account_id)
+            .map_err(err)
+    })
+    .await
 }
 
 #[tauri::command]

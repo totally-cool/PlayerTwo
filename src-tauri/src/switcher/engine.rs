@@ -254,7 +254,13 @@ impl Engine {
             match artifact {
                 LoginArtifact::File { live, saved } => {
                     let live = self.host.expand_vars(live);
-                    copy_into_saved(Path::new(&live), &dir.join(saved))?;
+                    let dest = dir.join(saved);
+                    // Clear any previous capture first, so a re-snapshot replaces
+                    // the saved login cleanly instead of merging new files over
+                    // stale ones (e.g. obsolete leveldb segments would otherwise
+                    // pile up and corrupt the profile over repeated switches).
+                    remove_saved(&dest);
+                    copy_into_saved(Path::new(&live), &dest)?;
                 }
                 LoginArtifact::Registry { key, value, saved } => {
                     if let Some(data) = self.host.read_registry(key, value)? {
@@ -270,6 +276,7 @@ impl Engine {
     /// Restore a saved account's files + registry values to the live locations.
     fn restore_login(&self, plat: &PlatformDef, account_id: &str) -> Result<()> {
         let dir = self.store.account_dir(&plat.id, account_id);
+        let snapshot = self.store.load_registry_snapshot(&plat.id, account_id)?;
         for artifact in &plat.login {
             match artifact {
                 LoginArtifact::File { live, saved } => {
@@ -277,7 +284,6 @@ impl Engine {
                     copy_from_saved(&dir.join(saved), Path::new(&live))?;
                 }
                 LoginArtifact::Registry { key, value, saved } => {
-                    let snapshot = self.store.load_registry_snapshot(&plat.id, account_id)?;
                     if let Some(data) = snapshot.get(saved) {
                         self.host.write_registry(key, value, data)?;
                     }
@@ -458,6 +464,24 @@ fn copy_from_saved(saved: &Path, live: &Path) -> Result<()> {
     if !saved.exists() {
         return Ok(()); // nothing was captured for this artifact
     }
+    // Wildcard artifact: files were captured by name into `saved/` (see
+    // `copy_into_saved`). The live path is a glob, not a real destination, so
+    // restore each saved file into the directory the glob points at.
+    let live_str = live.to_string_lossy();
+    if live_str.contains('*') {
+        if let Some(parent) = live.parent() {
+            std::fs::create_dir_all(parent)?;
+            if saved.is_dir() {
+                for entry in std::fs::read_dir(saved)? {
+                    let entry = entry?;
+                    if entry.path().is_file() {
+                        std::fs::copy(entry.path(), parent.join(entry.file_name()))?;
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
     if saved.is_dir() {
         copy_dir_recursive(saved, live)?;
     } else {
@@ -467,6 +491,16 @@ fn copy_from_saved(saved: &Path, live: &Path) -> Result<()> {
         std::fs::copy(saved, live)?;
     }
     Ok(())
+}
+
+/// Remove a previously-saved artifact (file or directory), ignoring errors.
+/// Used before a re-capture so stale files don't linger in the saved profile.
+fn remove_saved(path: &Path) {
+    if path.is_dir() {
+        let _ = std::fs::remove_dir_all(path);
+    } else if path.is_file() {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn delete_live(path: &str) -> Result<()> {
