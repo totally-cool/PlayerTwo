@@ -82,7 +82,7 @@ The generic switch (engine, `src-tauri/src/switcher/engine.rs`):
 
 ## Install
 
-**⬇ [Download PlayerTwo 0.1.2 — Windows installer (.exe)](https://github.com/totally-cool/PlayerTwo/releases/download/v0.1.2/PlayerTwo_0.1.2_x64-setup.exe)**
+**⬇ [Download PlayerTwo 0.1.3 — Windows installer (.exe)](https://github.com/totally-cool/PlayerTwo/releases/download/v0.1.3/PlayerTwo_0.1.3_x64-setup.exe)**
 
 Or browse every build (`.msi` included) on the [**Releases**](https://github.com/totally-cool/PlayerTwo/releases/latest) page.
 Windows may show a SmartScreen warning until the app is code-signed — click "More info → Run anyway".
