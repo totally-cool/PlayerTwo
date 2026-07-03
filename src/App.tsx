@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, type ReactNode } from "react";
+import { useEffect, useState, useCallback, useRef, type ReactNode } from "react";
 import {
   AppBar,
   Toolbar,
@@ -48,7 +48,7 @@ import SettingsBrightnessIcon from "@mui/icons-material/SettingsBrightness";
 import SettingsIcon from "@mui/icons-material/Settings";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, Account, AddResult, PlatformSummary, Settings } from "./api";
-import { PlatformIcon, platformInfo, avatarColor } from "./platformIcons";
+import { PlatformIcon, platformInfo, avatarColor, generatedAvatar } from "./platformIcons";
 import { SettingsDialog, AccountSettingsDialog } from "./SettingsDialog";
 import { UpdateNotifier } from "./UpdateNotifier";
 
@@ -87,33 +87,57 @@ function ModeToggle() {
 }
 
 /**
- * New-profile flow. The launcher has already been opened logged-out. We sit at
- * step 0 until the user confirms they've logged in, then ask for a name. If the
- * captured account already exists, a banner offers to rename it instead.
+ * New-profile flow.
+ *
+ * Entry modes:
+ * - "choose": ask whether to log out for a fresh login, or clone the account
+ *   that's currently signed in. This is the default "New profile" path.
+ * - "import": skip the question and go straight to naming the current login.
+ *
+ * Steps: "pick" (the choose question) → "wait" (fresh only: launcher is open,
+ * waiting for the user to sign into a different account) → "name" (name & save).
+ * If the captured account already exists, a banner offers to rename it instead.
  * Cancel is always available.
  */
 function NewProfileDialog(props: {
   open: boolean;
-  mode: "fresh" | "import";
+  mode: "choose" | "import";
   platformName?: string;
+  /** Whether an account is signed in now (i.e. there's a login to clone). */
+  canClone: boolean;
   onClose: () => void;
+  /** Trigger the log-out + open-launcher step for a fresh sign-in. */
+  onStartFresh: () => void;
   onSave: (name: string) => Promise<AddResult>;
   onRename: (acc: Account) => void;
 }) {
-  // "fresh" starts at the wait-for-login step; "import" goes straight to naming.
-  const [step, setStep] = useState<0 | 1>(0);
+  type Step = "pick" | "wait" | "name";
+  const [step, setStep] = useState<Step>("pick");
+  const [flow, setFlow] = useState<"fresh" | "clone">("clone");
   const [name, setName] = useState("");
   const [exists, setExists] = useState<Account | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (props.open) {
-      setStep(props.mode === "fresh" ? 0 : 1);
+      // "import" jumps straight to naming the current login; "choose" asks first.
+      setStep(props.mode === "import" ? "name" : "pick");
+      setFlow("clone");
       setName("");
       setExists(null);
       setBusy(false);
     }
   }, [props.open, props.mode]);
+
+  const chooseFresh = () => {
+    setFlow("fresh");
+    props.onStartFresh();
+    setStep("wait");
+  };
+  const chooseClone = () => {
+    setFlow("clone");
+    setStep("name");
+  };
 
   const save = async () => {
     if (!name.trim() || busy) return;
@@ -128,16 +152,55 @@ function NewProfileDialog(props: {
     }
   };
 
-  const title = props.mode === "fresh" ? "New profile" : "Import current login";
+  const optionSx = {
+    justifyContent: "flex-start",
+    textAlign: "left" as const,
+    textTransform: "none" as const,
+    py: 1.25,
+    px: 1.75,
+  };
 
   return (
     <Dialog open={props.open} onClose={props.onClose} fullWidth maxWidth="sm">
       <DialogTitle>
-        {title}
+        New profile
         {props.platformName ? ` — ${props.platformName}` : ""}
       </DialogTitle>
       <DialogContent>
-        {step === 0 ? (
+        {step === "pick" ? (
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mt: 1 }}>
+            <DialogContentText>How do you want to create this profile?</DialogContentText>
+            <Button variant="outlined" size="large" startIcon={<AddIcon />} sx={optionSx} onClick={chooseFresh}>
+              <Box>
+                <Typography sx={{ fontWeight: 600, color: "text.primary" }}>
+                  Sign into a different account
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Logs out of the current account and opens the launcher for a fresh sign-in.
+                </Typography>
+              </Box>
+            </Button>
+            <Button
+              variant="outlined"
+              size="large"
+              startIcon={<DownloadIcon />}
+              sx={optionSx}
+              disabled={!props.canClone}
+              onClick={chooseClone}
+            >
+              <Box>
+                <Typography sx={{ fontWeight: 600, color: "text.primary" }}>
+                  Clone the current login
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {props.canClone
+                    ? "Saves the account you're signed into now — nothing is logged out."
+                    : "No signed-in account was detected to clone."}
+                </Typography>
+              </Box>
+            </Button>
+          </Box>
+        ) : step === "wait" ? (
           <DialogContentText>
             The launcher has opened. Sign into the <b>new</b> account, and once you’re fully
             logged in, click <b>“I’ve logged in”</b>.
@@ -145,9 +208,9 @@ function NewProfileDialog(props: {
         ) : (
           <>
             <DialogContentText sx={{ mb: 2 }}>
-              {props.mode === "import"
+              {flow === "clone"
                 ? "Save the account currently signed in — nothing is logged out."
-                : "Name this profile to save the current login."}
+                : "Name this profile to save the new login."}
             </DialogContentText>
             {exists && (
               <Alert
@@ -177,15 +240,15 @@ function NewProfileDialog(props: {
       </DialogContent>
       <DialogActions>
         <Button onClick={props.onClose}>Cancel</Button>
-        {step === 0 ? (
-          <Button variant="contained" onClick={() => setStep(1)}>
+        {step === "wait" ? (
+          <Button variant="contained" onClick={() => setStep("name")}>
             I’ve logged in
           </Button>
-        ) : (
+        ) : step === "name" ? (
           <Button variant="contained" disabled={busy} onClick={save}>
             Save
           </Button>
-        )}
+        ) : null}
       </DialogActions>
     </Dialog>
   );
@@ -217,7 +280,7 @@ export default function App() {
   );
   const [newProfile, setNewProfile] = useState<{
     platformId: string;
-    mode: "fresh" | "import";
+    mode: "choose" | "import";
   } | null>(null);
 
   const refreshAll = useCallback(async () => {
@@ -245,11 +308,61 @@ export default function App() {
     }
   }, []);
 
+  // Re-detect just the active account for one platform (light — no full reload).
+  const refreshCurrent = useCallback(async (platformId: string) => {
+    try {
+      const id = await api.currentAccountId(platformId);
+      setCurrentByPlatform((prev) => ({ ...prev, [platformId]: id }));
+    } catch {
+      /* leave the existing value in place */
+    }
+  }, []);
+
+  // Re-detect the active account for every enabled platform (e.g. on refocus).
+  const refreshCurrents = useCallback(async () => {
+    await Promise.all(platforms.filter((p) => p.enabled).map((p) => refreshCurrent(p.id)));
+  }, [platforms, refreshCurrent]);
+
+  // Bumped on every switch so late poll callbacks from a superseded switch can't
+  // clobber a newer one's result.
+  const switchSeq = useRef(0);
+
+  // The launcher applies the login change asynchronously (and may rewrite files
+  // as it relaunches), so a single read right after a switch can still see the
+  // old account. Poll a few times with backoff until the detection settles.
+  const pollCurrentAfterSwitch = useCallback((platformId: string) => {
+    const seq = ++switchSeq.current;
+    for (const ms of [1000, 2500, 5000, 9000]) {
+      setTimeout(async () => {
+        if (switchSeq.current !== seq) return; // superseded by a newer switch
+        try {
+          const id = await api.currentAccountId(platformId);
+          // Ignore a transient "nothing detected" while the app is relaunching.
+          if (id != null && switchSeq.current === seq) {
+            setCurrentByPlatform((prev) => ({ ...prev, [platformId]: id }));
+          }
+        } catch {
+          /* leave the optimistic value in place */
+        }
+      }, ms);
+    }
+  }, []);
+
   useEffect(() => {
     // Keep the active account's rotating token (Epic) fresh, then load.
     api.renewActiveTokens().catch(() => {});
     refreshAll();
   }, [refreshAll]);
+
+  // Re-check active accounts when the window regains focus — covers logins the
+  // user completed in the launcher while PlayerTwo was in the background.
+  useEffect(() => {
+    const onFocus = () => {
+      refreshCurrents();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshCurrents]);
 
   useEffect(() => {
     localStorage.setItem(VIEW_KEY, view);
@@ -296,6 +409,10 @@ export default function App() {
         sev: out.already_active ? "info" : "success",
       });
       await refreshAll();
+      // Keep checking for a few seconds — the launcher applies the change (and
+      // may rewrite its login files) after relaunch, so the active account can
+      // settle a moment later.
+      pollCurrentAfterSwitch(platformId);
       if (settings?.minimize_after_switch) {
         try {
           await getCurrentWindow().minimize();
@@ -340,19 +457,21 @@ export default function App() {
     }
   };
 
-  // "New profile": log out, open the launcher for a fresh sign-in, then capture.
-  const onNewProfile = async (platformId: string) => {
-    setNewProfile({ platformId, mode: "fresh" });
+  // "New profile": ask whether to log out for a fresh login or clone the
+  // account signed in now (the chooser lives in NewProfileDialog).
+  const onNewProfile = (platformId: string) => {
+    setNewProfile({ platformId, mode: "choose" });
+  };
+
+  // Chosen "fresh login": log out and open the launcher for a fresh sign-in.
+  const onStartFreshLogin = async () => {
+    const platformId = newProfile?.platformId;
+    if (!platformId) return;
     try {
       await api.prepareNewLogin(platformId);
     } catch (e) {
       setToast({ msg: String(e), sev: "error" });
     }
-  };
-
-  // "Import current login": capture whoever is signed in now — no logout.
-  const onImportCurrent = (platformId: string) => {
-    setNewProfile({ platformId, mode: "import" });
   };
 
   const onSaveNew = async (name: string): Promise<AddResult> => {
@@ -379,12 +498,6 @@ export default function App() {
     view === "all" ? enabledPlatforms : enabledPlatforms.filter((p) => p.id === view);
   const newProfileName = platforms.find((p) => p.id === newProfile?.platformId)?.name;
   const detectedNames = platforms.filter((p) => p.detected).map((p) => p.name);
-
-  // Only offer "import current" when something is logged in that isn't saved yet.
-  const currentId = view !== "all" ? currentByPlatform[view] ?? null : null;
-  const currentAlreadySaved =
-    currentId != null && (accountsByPlatform[view] ?? []).some((a) => a.id === currentId);
-  const showImport = view !== "all" && currentId != null && !currentAlreadySaved;
 
   // Sidebar: alphabetical, split into "has profiles" and "empty" sections.
   const sortedPlatforms = [...enabledPlatforms].sort((a, b) => a.name.localeCompare(b.name));
@@ -455,7 +568,7 @@ export default function App() {
         <ListItemButton selected={isActive} onClick={() => onSwitch(pid, acc)}>
           <ListItemAvatar sx={{ minWidth: 44 }}>
             <Avatar
-              src={acc.image ?? undefined}
+              src={acc.image ?? generatedAvatar(acc.id)}
               sx={{ width: 32, height: 32, fontSize: 14, bgcolor: av.bg, color: av.fg }}
             >
               {acc.display_name.charAt(0).toUpperCase()}
@@ -493,7 +606,7 @@ export default function App() {
           sx={{ p: 2, pt: 3.5, display: "flex", flexDirection: "column", gap: 1 }}
         >
           <Avatar
-            src={acc.image ?? undefined}
+            src={acc.image ?? generatedAvatar(acc.id)}
             sx={{
               width: 56,
               height: 56,
@@ -575,7 +688,7 @@ export default function App() {
                 variant="outlined"
                 color="primary"
                 avatar={
-                  <Avatar src={activeAcc.image ?? undefined}>
+                  <Avatar src={activeAcc.image ?? generatedAvatar(activeAcc.id)}>
                     {activeAcc.display_name.charAt(0).toUpperCase()}
                   </Avatar>
                 }
@@ -793,79 +906,39 @@ export default function App() {
                   collapsible: false,
                   footer:
                     layout === "list" ? (
-                      <>
-                        {showImport && (
-                          <ListItemButton
-                            onClick={() => onImportCurrent(view)}
-                            sx={{ color: "primary.main" }}
-                          >
-                            <ListItemIcon sx={{ minWidth: 44, color: "primary.main" }}>
-                              <DownloadIcon />
-                            </ListItemIcon>
-                            <ListItemText primary="Import current login" />
-                          </ListItemButton>
-                        )}
-                        <ListItemButton
-                          onClick={() => onNewProfile(view)}
-                          sx={{ color: "primary.main" }}
-                        >
-                          <ListItemIcon sx={{ minWidth: 44, color: "primary.main" }}>
-                            <AddIcon />
-                          </ListItemIcon>
-                          <ListItemText primary="New profile" />
-                        </ListItemButton>
-                      </>
+                      <ListItemButton
+                        onClick={() => onNewProfile(view)}
+                        sx={{ color: "primary.main" }}
+                      >
+                        <ListItemIcon sx={{ minWidth: 44, color: "primary.main" }}>
+                          <AddIcon />
+                        </ListItemIcon>
+                        <ListItemText primary="New profile" />
+                      </ListItemButton>
                     ) : (
-                      <>
-                        {showImport && (
-                          <Card
-                            variant="outlined"
-                            sx={{ borderStyle: "dashed", borderColor: "primary.main", minHeight: 132 }}
-                          >
-                            <CardActionArea
-                              onClick={() => onImportCurrent(view)}
-                              sx={{
-                                height: "100%",
-                                p: 2,
-                                display: "flex",
-                                flexDirection: "column",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                gap: 1,
-                                color: "primary.main",
-                              }}
-                            >
-                              <DownloadIcon fontSize="large" />
-                              <Typography variant="body2" color="primary" align="center">
-                                Import current login
-                              </Typography>
-                            </CardActionArea>
-                          </Card>
-                        )}
-                        <Card
-                          variant="outlined"
-                          sx={{ borderStyle: "dashed", borderColor: "primary.main", minHeight: 132 }}
+                      <Card
+                        variant="outlined"
+                        sx={{ borderStyle: "dashed", borderColor: "primary.main", minHeight: 132 }}
+                      >
+                        <CardActionArea
+                          onClick={() => onNewProfile(view)}
+                          sx={{
+                            height: "100%",
+                            p: 2,
+                            display: "flex",
+                            flexDirection: "column",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            gap: 1,
+                            color: "primary.main",
+                          }}
                         >
-                          <CardActionArea
-                            onClick={() => onNewProfile(view)}
-                            sx={{
-                              height: "100%",
-                              p: 2,
-                              display: "flex",
-                              flexDirection: "column",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              gap: 1,
-                              color: "primary.main",
-                            }}
-                          >
-                            <AddIcon fontSize="large" />
-                            <Typography variant="body2" color="primary" align="center">
-                              New profile
-                            </Typography>
-                          </CardActionArea>
-                        </Card>
-                      </>
+                          <AddIcon fontSize="large" />
+                          <Typography variant="body2" color="primary" align="center">
+                            New profile
+                          </Typography>
+                        </CardActionArea>
+                      </Card>
                     ),
                 },
               )}
@@ -877,9 +950,11 @@ export default function App() {
 
       <NewProfileDialog
         open={!!newProfile}
-        mode={newProfile?.mode ?? "fresh"}
+        mode={newProfile?.mode ?? "choose"}
         platformName={newProfileName}
+        canClone={newProfile ? currentByPlatform[newProfile.platformId] != null : false}
         onClose={() => setNewProfile(null)}
+        onStartFresh={onStartFreshLogin}
         onSave={onSaveNew}
         onRename={onRenameExisting}
       />

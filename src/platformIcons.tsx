@@ -130,6 +130,55 @@ export function avatarColor(seed: string): { bg: string; fg: string } {
   return { bg, fg: contrastText(bg) };
 }
 
+/** FNV-1a hash + Murmur3 finalizer → unsigned 32-bit. The avalanche step is
+ *  what makes even the low bits well-distributed (the identicon samples them),
+ *  so distinct seeds don't collide into the same pattern. */
+function hashSeed(seed: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x7feb352d);
+  h ^= h >>> 15;
+  h = Math.imul(h, 0x846ca68b);
+  h ^= h >>> 16;
+  return h >>> 0;
+}
+
+/**
+ * A deterministic, unique avatar for a login, seeded from its account id.
+ * Returns an inline-SVG data URL usable as an `<Avatar src>`: a GitHub-style
+ * 5×5 identicon (mirrored across the vertical axis) in a per-seed brand hue.
+ * Used as the default when a login has no custom image; uploads override it.
+ */
+export function generatedAvatar(seed: string): string {
+  const hue = hashSeed(seed) % 360;
+  const fg = `hsl(${hue}, 62%, 46%)`;
+  const bg = `hsl(${hue}, 45%, 95%)`;
+  const grid = 5;
+  const cell = 100 / grid;
+  const rects: string[] = [];
+  for (let r = 0; r < grid; r++) {
+    // A fresh hash per row gives independent bits for the three source columns.
+    const rowBits = hashSeed(`${seed}:${r}`);
+    for (let c = 0; c < grid; c++) {
+      const src = c < 3 ? c : grid - 1 - c; // mirror columns 3,4 from 1,0
+      if ((rowBits >> src) & 1) {
+        rects.push(
+          `<rect x='${c * cell}' y='${r * cell}' width='${cell}' height='${cell}'/>`,
+        );
+      }
+    }
+  }
+  const svg =
+    `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>` +
+    `<rect width='100' height='100' fill='${bg}'/>` +
+    `<g fill='${fg}'>${rects.join("")}</g></svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
 /** Short, plain-language note about how switching works for each platform. */
 const INFO: Record<string, string> = {
   steam:
