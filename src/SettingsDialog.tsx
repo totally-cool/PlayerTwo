@@ -30,7 +30,7 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, Settings, PlatformSummary, Account } from "./api";
-import { PlatformIcon, platformInfo } from "./platformIcons";
+import { PlatformIcon, platformInfo, generatedAvatar } from "./platformIcons";
 
 /** Header/footer bar background: paper + a hover-tint overlay, so it reads as a
  *  distinct band from the content in BOTH light and dark mode. */
@@ -452,7 +452,10 @@ export function AccountSettingsDialog(props: {
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
           <Box sx={{ display: "flex", gap: 2, alignItems: "center" }}>
-            <Avatar src={image ?? undefined} sx={{ width: 64, height: 64 }}>
+            <Avatar
+              src={image ?? (props.account ? generatedAvatar(props.account.id) : undefined)}
+              sx={{ width: 64, height: 64 }}
+            >
               {name.charAt(0).toUpperCase()}
             </Avatar>
             <Box>

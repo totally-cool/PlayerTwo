@@ -48,7 +48,7 @@ import SettingsBrightnessIcon from "@mui/icons-material/SettingsBrightness";
 import SettingsIcon from "@mui/icons-material/Settings";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, Account, AddResult, PlatformSummary, Settings } from "./api";
-import { PlatformIcon, platformInfo, avatarColor } from "./platformIcons";
+import { PlatformIcon, platformInfo, avatarColor, generatedAvatar } from "./platformIcons";
 import { SettingsDialog, AccountSettingsDialog } from "./SettingsDialog";
 import { UpdateNotifier } from "./UpdateNotifier";
 
@@ -568,7 +568,7 @@ export default function App() {
         <ListItemButton selected={isActive} onClick={() => onSwitch(pid, acc)}>
           <ListItemAvatar sx={{ minWidth: 44 }}>
             <Avatar
-              src={acc.image ?? undefined}
+              src={acc.image ?? generatedAvatar(acc.id)}
               sx={{ width: 32, height: 32, fontSize: 14, bgcolor: av.bg, color: av.fg }}
             >
               {acc.display_name.charAt(0).toUpperCase()}
@@ -606,7 +606,7 @@ export default function App() {
           sx={{ p: 2, pt: 3.5, display: "flex", flexDirection: "column", gap: 1 }}
         >
           <Avatar
-            src={acc.image ?? undefined}
+            src={acc.image ?? generatedAvatar(acc.id)}
             sx={{
               width: 56,
               height: 56,
@@ -688,7 +688,7 @@ export default function App() {
                 variant="outlined"
                 color="primary"
                 avatar={
-                  <Avatar src={activeAcc.image ?? undefined}>
+                  <Avatar src={activeAcc.image ?? generatedAvatar(activeAcc.id)}>
                     {activeAcc.display_name.charAt(0).toUpperCase()}
                   </Avatar>
                 }
