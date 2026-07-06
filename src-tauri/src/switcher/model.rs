@@ -86,6 +86,11 @@ pub struct PlatformDef {
     /// Process image names to terminate before swapping files.
     #[serde(default)]
     pub exes_to_end: Vec<String>,
+    /// Seconds to wait for `exes_to_end` to fully exit before aborting the switch.
+    /// Some launchers (notably Epic, with its lingering web-helper processes) are
+    /// slow to close; raise this for them. Unset falls back to the engine default.
+    #[serde(default)]
+    pub exit_timeout_secs: Option<u64>,
     /// The set of files/registry values that constitute a login.
     pub login: Vec<LoginArtifact>,
     /// Additional live paths to delete on logout (besides the login files above).

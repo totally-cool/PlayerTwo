@@ -95,7 +95,7 @@ being treated as "no accounts".
 
 ## Install
 
-**⬇ [Download PlayerTwo 0.1.4 — Windows installer (.exe)](https://github.com/totally-cool/PlayerTwo/releases/download/v0.1.4/PlayerTwo_0.1.4_x64-setup.exe)**
+**⬇ [Download PlayerTwo 0.1.5 — Windows installer (.exe)](https://github.com/totally-cool/PlayerTwo/releases/download/v0.1.5/PlayerTwo_0.1.5_x64-setup.exe)**
 
 Or browse every build (`.msi` included) on the [**Releases**](https://github.com/totally-cool/PlayerTwo/releases/latest) page.
 Windows may show a SmartScreen warning until the app is code-signed — click "More info → Run anyway".

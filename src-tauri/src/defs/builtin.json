@@ -27,6 +27,7 @@
     ],
     "exe_args": "-silent",
     "exes_to_end": ["EpicGamesLauncher.exe", "EpicWebHelper.exe"],
+    "exit_timeout_secs": 25,
     "login": [
       { "kind": "file", "live": "%LocalAppData%\\EpicGamesLauncher\\Saved\\Config\\WindowsEditor\\GameUserSettings.ini", "saved": "GameUserSettings.ini" },
       { "kind": "registry", "key": "HKCU\\Software\\Epic Games\\Unreal Engine\\Identifiers", "value": "AccountId", "saved": "AccountId" }

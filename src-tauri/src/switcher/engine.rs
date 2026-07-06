@@ -17,6 +17,12 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// How long to wait for a platform's processes to exit before aborting a switch,
+/// when the platform definition doesn't specify its own `exit_timeout_secs`.
+const DEFAULT_EXIT_TIMEOUT_SECS: u64 = 10;
+/// How often to re-check whether the processes have exited.
+const EXIT_POLL_INTERVAL_MS: u64 = 100;
+
 pub struct Engine {
     host: Box<dyn Host>,
     store: Store,
@@ -277,28 +283,33 @@ impl Engine {
     /// login files, so callers abort the switch rather than proceed.
     fn ensure_stopped(&self, plat: &PlatformDef) -> Result<()> {
         self.host.kill_processes(&plat.exes_to_end)?;
-        if !self.wait_for_exit(&plat.exes_to_end) {
+        let timeout_secs = plat.exit_timeout_secs.unwrap_or(DEFAULT_EXIT_TIMEOUT_SECS);
+        if !self.wait_for_exit(&plat.exes_to_end, timeout_secs) {
             bail!(
-                "{} is still running after being asked to close; aborting the switch to avoid corrupting its files",
-                plat.name
+                "{} is still running ~{}s after being asked to close; aborting the switch to avoid \
+                 corrupting its files. If this launcher is just slow to close, raise its \
+                 `exit_timeout_secs` in the platform definition.",
+                plat.name,
+                timeout_secs
             );
         }
         Ok(())
     }
 
-    /// Poll until no process in `exe_names` remains, up to ~5 seconds. Returns
+    /// Poll until no process in `exe_names` remains, up to `timeout_secs`. Returns
     /// `true` if everything exited (or there was nothing to wait for), `false` if
     /// a process is still running when the timeout elapses.
     #[must_use]
-    fn wait_for_exit(&self, exe_names: &[String]) -> bool {
+    fn wait_for_exit(&self, exe_names: &[String], timeout_secs: u64) -> bool {
         if exe_names.is_empty() {
             return true;
         }
-        for _ in 0..50 {
+        let attempts = (timeout_secs * 1000 / EXIT_POLL_INTERVAL_MS).max(1);
+        for _ in 0..attempts {
             if !self.host.are_running(exe_names) {
                 return true;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(EXIT_POLL_INTERVAL_MS));
         }
         !self.host.are_running(exe_names)
     }
@@ -742,6 +753,7 @@ mod tests {
             exe_locators: vec![],
             exe_args: None,
             exes_to_end: vec![],
+            exit_timeout_secs: None,
             login: vec![
                 LoginArtifact::File {
                     live,
@@ -944,6 +956,7 @@ mod tests {
             exe_locators: vec![],
             exe_args: None,
             exes_to_end: vec![],
+            exit_timeout_secs: None,
             login: vec![],
             clear: vec![],
             unique_id: UniqueId::Registry {
