@@ -63,6 +63,7 @@ pub fn run() {
             commands::add_current_account,
             commands::prepare_new_login,
             commands::renew_active_tokens,
+            commands::epic_token_saved_at,
             commands::update_account,
             commands::forget_account,
             commands::get_data_dir,

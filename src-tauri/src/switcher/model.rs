@@ -108,4 +108,9 @@ pub struct Account {
     /// Relative path to a profile image inside the account folder, if any.
     #[serde(default)]
     pub image: Option<String>,
+    /// Unix seconds this account was last switched to. Drives most-recently-used
+    /// ordering. Populated at read time from the store's MRU map; omitted on disk
+    /// when unset, so existing `accounts.json` files are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<u64>,
 }

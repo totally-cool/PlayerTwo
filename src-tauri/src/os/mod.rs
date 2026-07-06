@@ -9,7 +9,9 @@ use anyhow::Result;
 #[cfg(windows)]
 pub mod windows;
 
-#[cfg(not(windows))]
+// Compiled off-Windows for the runtime placeholder host, and always under `test`
+// so engine tests can drive a controllable in-memory host on any platform.
+#[cfg(any(not(windows), test))]
 pub mod stub;
 
 /// All OS-specific operations the engine needs.
@@ -46,6 +48,6 @@ pub fn host() -> Box<dyn Host> {
     }
     #[cfg(not(windows))]
     {
-        Box::new(stub::StubHost)
+        Box::new(stub::StubHost::new())
     }
 }

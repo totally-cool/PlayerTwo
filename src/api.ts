@@ -26,6 +26,8 @@ export interface Account {
   display_name: string;
   note: string | null;
   image: string | null;
+  /** Unix seconds this account was last switched to, if ever. */
+  last_used?: number | null;
 }
 
 export interface SwitchOutcome {
@@ -61,6 +63,9 @@ export const api = {
     invoke<boolean>("prepare_new_login", { platform }),
 
   renewActiveTokens: () => invoke<void>("renew_active_tokens"),
+
+  epicTokenSavedAt: (accountId: string) =>
+    invoke<number | null>("epic_token_saved_at", { accountId }),
 
   addCurrentAccount: (platform: string, displayName: string) =>
     invoke<AddResult>("add_current_account", { platform, displayName }),

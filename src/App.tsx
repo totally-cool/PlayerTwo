@@ -28,6 +28,7 @@ import {
   TextField,
   Tooltip,
   IconButton,
+  CircularProgress,
 } from "@mui/material";
 import { useColorScheme } from "@mui/material/styles";
 import { keyframes } from "@mui/system";
@@ -42,6 +43,8 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
+import ReplayIcon from "@mui/icons-material/Replay";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import SettingsBrightnessIcon from "@mui/icons-material/SettingsBrightness";
@@ -53,6 +56,24 @@ import { SettingsDialog, AccountSettingsDialog } from "./SettingsDialog";
 import { UpdateNotifier } from "./UpdateNotifier";
 
 const VIEW_KEY = "view";
+
+/** Compact "3m ago" style relative time from a unix-seconds timestamp. */
+function relativeTime(unixSecs: number): string {
+  const diff = Math.max(0, Date.now() / 1000 - unixSecs);
+  if (diff < 45) return "just now";
+  const mins = Math.floor(diff / 60);
+  if (mins < 60) return `${Math.max(1, mins)}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.floor(months / 12)}y ago`;
+}
+
+/** Ordered, human-readable steps shown on a card while a switch is in flight. */
+const SWITCH_STEPS = ["Closing…", "Swapping login…", "Launching…"] as const;
 
 // Slide-in transitions, re-triggered by changing the element's `key`.
 const slideUp = keyframes`
@@ -105,13 +126,18 @@ function NewProfileDialog(props: {
   platformName?: string;
   /** Whether an account is signed in now (i.e. there's a login to clone). */
   canClone: boolean;
+  /** Whether the signed-in account is a live login NOT saved in the store, so a
+   *  fresh sign-in would destroy it unless imported first. */
+  currentUntracked: boolean;
   onClose: () => void;
   /** Trigger the log-out + open-launcher step for a fresh sign-in. */
   onStartFresh: () => void;
+  /** Import (save) the currently signed-in login before it's cleared. */
+  onImportCurrent: () => Promise<void>;
   onSave: (name: string) => Promise<AddResult>;
   onRename: (acc: Account) => void;
 }) {
-  type Step = "pick" | "wait" | "name";
+  type Step = "pick" | "confirm" | "wait" | "name";
   const [step, setStep] = useState<Step>("pick");
   const [flow, setFlow] = useState<"fresh" | "clone">("clone");
   const [name, setName] = useState("");
@@ -129,10 +155,32 @@ function NewProfileDialog(props: {
     }
   }, [props.open, props.mode]);
 
-  const chooseFresh = () => {
+  const proceedFresh = () => {
     setFlow("fresh");
     props.onStartFresh();
     setStep("wait");
+  };
+  const chooseFresh = () => {
+    // Guard the destructive path: if a live, unsaved login would be wiped, make
+    // the user confirm (and offer to import it first).
+    if (props.currentUntracked) {
+      setFlow("fresh");
+      setStep("confirm");
+      return;
+    }
+    proceedFresh();
+  };
+  const importThenFresh = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await props.onImportCurrent();
+      proceedFresh();
+    } catch {
+      // surfaced via parent toast
+    } finally {
+      setBusy(false);
+    }
   };
   const chooseClone = () => {
     setFlow("clone");
@@ -196,6 +244,29 @@ function NewProfileDialog(props: {
                   {props.canClone
                     ? "Saves the account you're signed into now — nothing is logged out."
                     : "No signed-in account was detected to clone."}
+                </Typography>
+              </Box>
+            </Button>
+          </Box>
+        ) : step === "confirm" ? (
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mt: 1 }}>
+            <Alert severity="warning">
+              The account signed in right now isn’t saved in PlayerTwo. Logging out to sign into a
+              different account will lose it unless you save it first.
+            </Alert>
+            <Button variant="contained" startIcon={<DownloadIcon />} sx={optionSx} disabled={busy} onClick={importThenFresh}>
+              <Box>
+                <Typography sx={{ fontWeight: 600 }}>Save it first, then log out</Typography>
+                <Typography variant="caption" sx={{ opacity: 0.85 }}>
+                  Imports the current login so you can switch back to it later.
+                </Typography>
+              </Box>
+            </Button>
+            <Button variant="outlined" color="error" sx={optionSx} disabled={busy} onClick={proceedFresh}>
+              <Box>
+                <Typography sx={{ fontWeight: 600 }}>Log out anyway</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Discards the current login and opens a fresh sign-in.
                 </Typography>
               </Box>
             </Button>
@@ -268,6 +339,13 @@ export default function App() {
   );
   const [accountsByPlatform, setAccountsByPlatform] = useState<Record<string, Account[]>>({});
   const [currentByPlatform, setCurrentByPlatform] = useState<Record<string, string | null>>({});
+  // Per-card switch progress ("<platformId>:<accountId>" -> current step label)
+  // and the last error for a card, driving an inline Retry action.
+  const [switchStep, setSwitchStep] = useState<Record<string, string>>({});
+  const [switchError, setSwitchError] = useState<Record<string, string>>({});
+  const stepTimers = useRef<Record<string, number[]>>({});
+  // Epic token freshness: accountId -> unix seconds the token was last saved.
+  const [epicTokenAt, setEpicTokenAt] = useState<Record<string, number | null>>({});
   const [settings, setSettings] = useState<Settings | null>(null);
   const [dataDir, setDataDir] = useState("");
   const [toast, setToast] = useState<{ msg: string; sev: "success" | "error" | "info" } | null>(
@@ -303,10 +381,40 @@ export default function App() {
       );
       setAccountsByPlatform(accs);
       setCurrentByPlatform(curs);
+      // Epic rotates login tokens, so surface how fresh each saved token is.
+      const epicAccs = accs["epic"] ?? [];
+      if (epicAccs.length > 0) {
+        const ages: Record<string, number | null> = {};
+        await Promise.all(
+          epicAccs.map(async (a) => {
+            try {
+              ages[a.id] = await api.epicTokenSavedAt(a.id);
+            } catch {
+              ages[a.id] = null;
+            }
+          }),
+        );
+        setEpicTokenAt(ages);
+      }
     } catch (e) {
       setToast({ msg: String(e), sev: "error" });
     }
   }, []);
+
+  // Refresh (renew) the active Epic account's rotating token, then re-read ages.
+  const onRenewEpicToken = useCallback(
+    async (accountId: string) => {
+      try {
+        await api.renewActiveTokens();
+        const at = await api.epicTokenSavedAt(accountId);
+        setEpicTokenAt((prev) => ({ ...prev, [accountId]: at }));
+        setToast({ msg: "Login token refreshed", sev: "success" });
+      } catch (e) {
+        setToast({ msg: String(e), sev: "error" });
+      }
+    },
+    [],
+  );
 
   // Re-detect just the active account for one platform (light — no full reload).
   const refreshCurrent = useCallback(async (platformId: string) => {
@@ -364,6 +472,14 @@ export default function App() {
     return () => window.removeEventListener("focus", onFocus);
   }, [refreshCurrents]);
 
+  // Clear any pending switch-step timers when the app unmounts.
+  useEffect(() => {
+    const timers = stepTimers.current;
+    return () => {
+      Object.values(timers).forEach((list) => list.forEach((t) => clearTimeout(t)));
+    };
+  }, []);
+
   useEffect(() => {
     localStorage.setItem(VIEW_KEY, view);
   }, [view]);
@@ -395,7 +511,37 @@ export default function App() {
     }
   }, [platforms, view]);
 
+  const clearStepTimers = useCallback((key: string) => {
+    (stepTimers.current[key] ?? []).forEach((t) => clearTimeout(t));
+    delete stepTimers.current[key];
+  }, []);
+
   const onSwitch = async (platformId: string, acc: Account) => {
+    const key = `${platformId}:${acc.id}`;
+    // Ignore repeat clicks while this card is already switching.
+    if (switchStep[key]) return;
+
+    // Show staged progress on the clicked card. The backend switch is a single
+    // blocking call, so we advance the labels on a timer as honest feedback and
+    // settle when it returns.
+    setSwitchError((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    setSwitchStep((prev) => ({ ...prev, [key]: SWITCH_STEPS[0] }));
+    clearStepTimers(key);
+    stepTimers.current[key] = [
+      window.setTimeout(
+        () => setSwitchStep((p) => (p[key] ? { ...p, [key]: SWITCH_STEPS[1] } : p)),
+        700,
+      ),
+      window.setTimeout(
+        () => setSwitchStep((p) => (p[key] ? { ...p, [key]: SWITCH_STEPS[2] } : p)),
+        1600,
+      ),
+    ];
+
     try {
       const out = await api.switchAccount(platformId, acc.id, settings?.auto_start ?? true);
       // Flip the active highlight immediately. Re-detecting the live account can
@@ -421,7 +567,17 @@ export default function App() {
         }
       }
     } catch (e) {
+      // Surface the (possibly abort/timeout) error inline on the card with Retry,
+      // as well as a toast.
+      setSwitchError((prev) => ({ ...prev, [key]: String(e) }));
       setToast({ msg: String(e), sev: "error" });
+    } finally {
+      clearStepTimers(key);
+      setSwitchStep((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
     }
   };
 
@@ -474,6 +630,19 @@ export default function App() {
     }
   };
 
+  // Import the currently signed-in login before a destructive fresh-login clear,
+  // so it isn't lost. Throws on failure so the dialog stays put.
+  const onImportCurrentLogin = async () => {
+    const platformId = newProfile?.platformId;
+    if (!platformId) return;
+    // Epic derives a name from its logs when none is given; others get a
+    // placeholder the user can rename later.
+    const name = platformId === "epic" ? "" : "Imported login";
+    await api.addCurrentAccount(platformId, name);
+    setToast({ msg: "Saved the current login", sev: "success" });
+    await refreshAll();
+  };
+
   const onSaveNew = async (name: string): Promise<AddResult> => {
     const platformId = newProfile!.platformId;
     const res = await api.addCurrentAccount(platformId, name);
@@ -497,6 +666,14 @@ export default function App() {
   const activePlatforms =
     view === "all" ? enabledPlatforms : enabledPlatforms.filter((p) => p.id === view);
   const newProfileName = platforms.find((p) => p.id === newProfile?.platformId)?.name;
+  // A fresh sign-in for this platform would wipe a live login that isn't saved.
+  const newProfilePlatform = newProfile?.platformId;
+  const newProfileCurrent = newProfilePlatform ? currentByPlatform[newProfilePlatform] : null;
+  const newProfileUntracked =
+    !!newProfilePlatform &&
+    newProfilePlatform !== "steam" &&
+    newProfileCurrent != null &&
+    !(accountsByPlatform[newProfilePlatform] ?? []).some((a) => a.id === newProfileCurrent);
   const detectedNames = platforms.filter((p) => p.detected).map((p) => p.name);
 
   // Sidebar: alphabetical, split into "has profiles" and "empty" sections.
@@ -551,21 +728,51 @@ export default function App() {
   const renderAccountRow = (pid: string, acc: Account) => {
     const isActive = currentByPlatform[pid] === acc.id;
     const av = avatarColor(acc.id);
+    const key = `${pid}:${acc.id}`;
+    const step = switchStep[key];
+    const error = switchError[key];
+    const busy = !!step;
+    const isEpic = pid === "epic";
+    const tokenAt = isEpic ? epicTokenAt[acc.id] : undefined;
+    const secondaryText = error
+      ? "Switch failed — tap retry"
+      : busy
+        ? step
+        : isEpic && tokenAt
+          ? `login saved ${relativeTime(tokenAt)}`
+          : acc.note || undefined;
     return (
       <ListItem
-        key={`${pid}:${acc.id}`}
+        key={key}
         disablePadding
         secondaryAction={
-          <IconButton
-            edge="end"
-            size="small"
-            onClick={() => setEditTarget({ platformId: pid, account: acc })}
-          >
-            <MoreVertIcon fontSize="small" />
-          </IconButton>
+          <Box sx={{ display: "flex", alignItems: "center" }}>
+            {busy && <CircularProgress size={18} sx={{ mr: 0.5 }} />}
+            {error && (
+              <Tooltip title="Retry switch">
+                <IconButton edge="end" size="small" color="warning" onClick={() => onSwitch(pid, acc)}>
+                  <ReplayIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            )}
+            {isEpic && isActive && !busy && !error && (
+              <Tooltip title="Refresh saved login token">
+                <IconButton edge="end" size="small" onClick={() => onRenewEpicToken(acc.id)}>
+                  <RefreshIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            )}
+            <IconButton
+              edge="end"
+              size="small"
+              onClick={() => setEditTarget({ platformId: pid, account: acc })}
+            >
+              <MoreVertIcon fontSize="small" />
+            </IconButton>
+          </Box>
         }
       >
-        <ListItemButton selected={isActive} onClick={() => onSwitch(pid, acc)}>
+        <ListItemButton selected={isActive} disabled={busy} onClick={() => onSwitch(pid, acc)}>
           <ListItemAvatar sx={{ minWidth: 44 }}>
             <Avatar
               src={acc.image ?? generatedAvatar(acc.id)}
@@ -574,8 +781,23 @@ export default function App() {
               {acc.display_name.charAt(0).toUpperCase()}
             </Avatar>
           </ListItemAvatar>
-          <ListItemText primary={acc.display_name} secondary={acc.note || undefined} />
-          {isActive && <CheckCircleIcon color="warning" fontSize="small" sx={{ mr: 1, opacity: 0.9 }} />}
+          <ListItemText
+            primary={acc.display_name}
+            secondary={
+              secondaryText ? (
+                <Typography
+                  component="span"
+                  variant="body2"
+                  sx={{ color: error ? "error.main" : busy ? "primary.main" : "text.secondary" }}
+                >
+                  {secondaryText}
+                </Typography>
+              ) : undefined
+            }
+          />
+          {isActive && !busy && !error && (
+            <CheckCircleIcon color="warning" fontSize="small" sx={{ mr: 1, opacity: 0.9 }} />
+          )}
         </ListItemButton>
       </ListItem>
     );
@@ -584,16 +806,22 @@ export default function App() {
   const renderAccountCard = (pid: string, acc: Account) => {
     const isActive = currentByPlatform[pid] === acc.id;
     const av = avatarColor(acc.id);
+    const key = `${pid}:${acc.id}`;
+    const step = switchStep[key];
+    const error = switchError[key];
+    const busy = !!step;
+    const isEpic = pid === "epic";
+    const tokenAt = isEpic ? epicTokenAt[acc.id] : undefined;
     return (
       <Card
-        key={`${pid}:${acc.id}`}
+        key={key}
         elevation={isActive ? 6 : 2}
         sx={{
           position: "relative",
           borderRadius: 2,
           border: isActive ? 2 : 0,
           borderStyle: "solid",
-          borderColor: "primary.main",
+          borderColor: error ? "error.main" : "primary.main",
           transition: "box-shadow 150ms ease, transform 150ms ease",
           "&:hover": { boxShadow: 8, transform: "translateY(-3px)" },
         }}
@@ -602,6 +830,7 @@ export default function App() {
           <PlatformIcon platformId={pid} size={16} brandColor />
         </Box>
         <CardActionArea
+          disabled={busy}
           onClick={() => onSwitch(pid, acc)}
           sx={{ p: 2, pt: 3.5, display: "flex", flexDirection: "column", gap: 1 }}
         >
@@ -619,8 +848,23 @@ export default function App() {
           <Typography variant="body2" noWrap sx={{ maxWidth: "100%" }}>
             {acc.display_name}
           </Typography>
-          {isActive ? (
+          {busy ? (
+            <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 0.5 }}>
+              <CircularProgress size={18} />
+              <Typography variant="caption" color="primary" noWrap>
+                {step}
+              </Typography>
+            </Box>
+          ) : error ? (
+            <Typography variant="caption" color="error" noWrap>
+              Switch failed
+            </Typography>
+          ) : isActive ? (
             <Chip size="small" color="warning" label="Active" />
+          ) : isEpic && tokenAt ? (
+            <Typography variant="caption" color="text.secondary" noWrap>
+              saved {relativeTime(tokenAt)}
+            </Typography>
           ) : (
             acc.note && (
               <Typography variant="caption" color="text.secondary" noWrap>
@@ -638,6 +882,29 @@ export default function App() {
             <MoreVertIcon fontSize="small" />
           </IconButton>
         </Tooltip>
+        {error && (
+          <Tooltip title="Retry switch">
+            <IconButton
+              size="small"
+              color="warning"
+              onClick={() => onSwitch(pid, acc)}
+              sx={{ position: "absolute", bottom: 4, right: 4, zIndex: 1 }}
+            >
+              <ReplayIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
+        {isEpic && isActive && !busy && !error && (
+          <Tooltip title="Refresh saved login token">
+            <IconButton
+              size="small"
+              onClick={() => onRenewEpicToken(acc.id)}
+              sx={{ position: "absolute", bottom: 4, left: 4, zIndex: 1 }}
+            >
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
       </Card>
     );
   };
@@ -953,8 +1220,10 @@ export default function App() {
         mode={newProfile?.mode ?? "choose"}
         platformName={newProfileName}
         canClone={newProfile ? currentByPlatform[newProfile.platformId] != null : false}
+        currentUntracked={newProfileUntracked}
         onClose={() => setNewProfile(null)}
         onStartFresh={onStartFreshLogin}
+        onImportCurrent={onImportCurrentLogin}
         onSave={onSaveNew}
         onRename={onRenameExisting}
       />

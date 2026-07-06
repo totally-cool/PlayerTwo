@@ -169,6 +169,7 @@ pub fn list_accounts(host: &dyn Host) -> Vec<Account> {
                 note: if account.is_empty() { None } else { Some(account) },
                 image: None,
                 id: b.steamid,
+                last_used: None,
             }
         })
         .collect()

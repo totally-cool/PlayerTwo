@@ -13,8 +13,9 @@
 use super::model::{Account, ExeLocator, LoginArtifact, PlatformDef, UniqueId};
 use super::store::{RegistrySnapshot, Store};
 use crate::os::Host;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct Engine {
     host: Box<dyn Host>,
@@ -86,10 +87,10 @@ impl Engine {
         auto_start: bool,
     ) -> Result<SwitchOutcome> {
         tracing::info!(platform = %plat.id, account = account_id, "switch start");
-        // 1. Stop the platform and wait for it to fully exit — avoids file locks
-        //    and the relaunch tripping the app's single-instance lock.
-        self.host.kill_processes(&plat.exes_to_end)?;
-        self.wait_for_exit(&plat.exes_to_end);
+        // 1. Stop the platform and wait for it to fully exit — avoids file locks,
+        //    racing the launcher's shutdown writes, and the relaunch tripping the
+        //    app's single-instance lock. Abort if it won't close.
+        self.ensure_stopped(plat)?;
 
         // 2. Save whoever is logged in now (if we can tell, and it isn't the target).
         if let Some(current) = self.current_id(plat)? {
@@ -104,18 +105,33 @@ impl Engine {
             }
             // Only auto-save if we already track this account (avoids capturing
             // a stranger). New accounts are added explicitly via `add_current`.
+            // A failed capture here aborts the switch *before* we clear anything,
+            // so a login is never lost to a silently-ignored capture error.
             if self.store.list_accounts(&plat.id)?.iter().any(|a| a.id == current) {
                 self.capture_login(plat, &current)?;
             }
         }
 
-        // 3. Clear the live login.
+        // 3. Snapshot the live login so a failed restore can be rolled back.
+        let backup = self.backup_live(plat)?;
+
+        // 4. Clear the live login.
         self.clear_login(plat)?;
 
-        // 4. Restore the target.
-        self.restore_login(plat, account_id)?;
+        // 5. Restore the target. If this fails the user would otherwise be left
+        //    logged out, so roll the previous login back into place.
+        if let Err(e) = self.restore_login(plat, account_id) {
+            tracing::error!(error = %e, "restore failed; rolling back to the previous login");
+            if let Err(re) = self.restore_backup(plat, &backup) {
+                return Err(e.context(format!(
+                    "restore failed and rollback ALSO failed ({re}); the login may be inconsistent — re-import the account"
+                )));
+            }
+            return Err(e.context("restore failed; rolled back to the previous login"));
+        }
+        // Success: `backup` is dropped here and its temp copy removed.
 
-        // 5. Relaunch.
+        // 6. Relaunch.
         let launched = self.maybe_launch(plat, auto_start)?;
         Ok(SwitchOutcome {
             switched: true,
@@ -129,8 +145,7 @@ impl Engine {
     /// a NEW account. The currently-active account is saved first if it's tracked,
     /// so nothing is lost.
     pub fn begin_new_login(&self, plat: &PlatformDef, auto_start: bool) -> Result<bool> {
-        self.host.kill_processes(&plat.exes_to_end)?;
-        self.wait_for_exit(&plat.exes_to_end);
+        self.ensure_stopped(plat)?;
         if let Some(current) = self.current_id(plat)? {
             if self.store.list_accounts(&plat.id)?.iter().any(|a| a.id == current) {
                 self.capture_login(plat, &current)?;
@@ -161,8 +176,7 @@ impl Engine {
         steamid: &str,
         auto_start: bool,
     ) -> Result<SwitchOutcome> {
-        self.host.kill_processes(&plat.exes_to_end)?;
-        self.wait_for_exit(&plat.exes_to_end);
+        self.ensure_stopped(plat)?;
         crate::switcher::steam::switch(&*self.host, steamid)?;
         let launched = self.maybe_launch(plat, auto_start)?;
         Ok(SwitchOutcome {
@@ -187,14 +201,37 @@ impl Engine {
         crate::switcher::epic::capture(&*self.host, &self.store, account_id)
     }
 
+    /// When the Epic token for `account_id` was last saved (unix seconds).
+    pub fn epic_token_saved_at(&self, account_id: &str) -> Option<u64> {
+        crate::switcher::epic::token_saved_at(&self.store, account_id)
+    }
+
     pub fn switch_epic(
         &self,
         plat: &PlatformDef,
         account_id: &str,
         auto_start: bool,
     ) -> Result<SwitchOutcome> {
-        self.host.kill_processes(&plat.exes_to_end)?;
-        self.wait_for_exit(&plat.exes_to_end);
+        self.ensure_stopped(plat)?;
+        // Epic rotates the RememberMe token every launcher session. Save the
+        // outgoing account's *fresh* token before overwriting the INI with the
+        // target's, otherwise the stored token goes stale and switching back to
+        // that account later fails. Aborting on capture failure is intentional:
+        // we must not overwrite a login we failed to save.
+        if let Some(current) = self.epic_current() {
+            if current == account_id {
+                let launched = self.maybe_launch(plat, auto_start)?;
+                return Ok(SwitchOutcome {
+                    switched: false,
+                    already_active: true,
+                    launched,
+                    message: "Account is already active".into(),
+                });
+            }
+            if self.store.list_accounts("epic")?.iter().any(|a| a.id == current) {
+                self.capture_epic(&current)?;
+            }
+        }
         crate::switcher::epic::switch(&*self.host, &self.store, account_id)?;
         let launched = self.maybe_launch(plat, auto_start)?;
         Ok(SwitchOutcome {
@@ -207,12 +244,13 @@ impl Engine {
 
     /// Clear Epic's live login and open the launcher for a fresh sign-in.
     pub fn epic_new_login(&self, plat: &PlatformDef, auto_start: bool) -> Result<bool> {
-        self.host.kill_processes(&plat.exes_to_end)?;
-        self.wait_for_exit(&plat.exes_to_end);
+        self.ensure_stopped(plat)?;
         // Save the current account first if it's tracked, so its token isn't lost.
+        // A failed capture aborts before we clear — clearing an un-saved login
+        // would permanently lose it.
         if let Some(id) = self.epic_current() {
             if self.store.list_accounts("epic")?.iter().any(|a| a.id == id) {
-                let _ = self.capture_epic(&id);
+                self.capture_epic(&id)?;
             }
         }
         crate::switcher::epic::clear(&*self.host)?;
@@ -224,23 +262,45 @@ impl Engine {
     pub fn epic_renew(&self) -> Result<()> {
         if let Some(id) = self.epic_current() {
             if self.store.list_accounts("epic")?.iter().any(|a| a.id == id) {
-                let _ = self.capture_epic(&id);
+                // Best-effort: renewal is a safe-to-skip refresh (no clear follows),
+                // so a failure here is logged, not fatal.
+                if let Err(e) = self.capture_epic(&id) {
+                    tracing::debug!(error = %e, account = %id, "epic token renew skipped");
+                }
             }
         }
         Ok(())
     }
 
-    /// Poll until no process in `exe_names` remains, up to ~5 seconds.
-    fn wait_for_exit(&self, exe_names: &[String]) {
+    /// Stop the platform and wait for it to fully exit, returning an error if it
+    /// won't. Racing a still-running launcher's shutdown writes can corrupt its
+    /// login files, so callers abort the switch rather than proceed.
+    fn ensure_stopped(&self, plat: &PlatformDef) -> Result<()> {
+        self.host.kill_processes(&plat.exes_to_end)?;
+        if !self.wait_for_exit(&plat.exes_to_end) {
+            bail!(
+                "{} is still running after being asked to close; aborting the switch to avoid corrupting its files",
+                plat.name
+            );
+        }
+        Ok(())
+    }
+
+    /// Poll until no process in `exe_names` remains, up to ~5 seconds. Returns
+    /// `true` if everything exited (or there was nothing to wait for), `false` if
+    /// a process is still running when the timeout elapses.
+    #[must_use]
+    fn wait_for_exit(&self, exe_names: &[String]) -> bool {
         if exe_names.is_empty() {
-            return;
+            return true;
         }
         for _ in 0..50 {
             if !self.host.are_running(exe_names) {
-                return;
+                return true;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        !self.host.are_running(exe_names)
     }
 
     /// Capture the *current* live login into the store under `account_id`.
@@ -285,6 +345,72 @@ impl Engine {
                 }
                 LoginArtifact::Registry { key, value, saved } => {
                     if let Some(data) = snapshot.get(saved) {
+                        self.host.write_registry(key, value, data)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Snapshot the live login (files + registry values + clear-extras + any
+    /// generated-id marker) into a throwaway temp directory so a failed restore
+    /// can be undone. The returned [`LiveBackup`] cleans its temp copy up on drop.
+    fn backup_live(&self, plat: &PlatformDef) -> Result<LiveBackup> {
+        let seq = BACKUP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("playertwo-rollback-{}-{}", std::process::id(), seq));
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create rollback dir {}", dir.display()))?;
+        let mut items = Vec::new();
+        let mut n = 0usize;
+
+        for artifact in &plat.login {
+            match artifact {
+                LoginArtifact::File { live, .. } => {
+                    let live = self.host.expand_vars(live);
+                    let rel = format!("f{n}");
+                    n += 1;
+                    copy_into_saved(Path::new(&live), &dir.join(&rel))?;
+                    items.push(BackupItem::File { live, rel });
+                }
+                LoginArtifact::Registry { key, value, .. } => {
+                    let data = self.host.read_registry(key, value)?;
+                    items.push(BackupItem::Registry {
+                        key: key.clone(),
+                        value: value.clone(),
+                        data,
+                    });
+                }
+            }
+        }
+        for extra in &plat.clear {
+            let live = self.host.expand_vars(extra);
+            let rel = format!("f{n}");
+            n += 1;
+            copy_into_saved(Path::new(&live), &dir.join(&rel))?;
+            items.push(BackupItem::File { live, rel });
+        }
+        if let UniqueId::GeneratedFile { file } = &plat.unique_id {
+            let live = self.host.expand_vars(file);
+            let rel = format!("f{n}");
+            copy_into_saved(Path::new(&live), &dir.join(&rel))?;
+            items.push(BackupItem::File { live, rel });
+        }
+        Ok(LiveBackup { dir, items })
+    }
+
+    /// Roll a [`LiveBackup`] back into the live locations after a failed restore.
+    /// First clears any partially-restored target artifacts, then writes the
+    /// snapshot back; artifacts that were absent at backup time stay absent.
+    fn restore_backup(&self, plat: &PlatformDef, backup: &LiveBackup) -> Result<()> {
+        self.clear_login(plat)?;
+        for item in &backup.items {
+            match item {
+                BackupItem::File { live, rel } => {
+                    copy_from_saved(&backup.dir.join(rel), Path::new(live))?;
+                }
+                BackupItem::Registry { key, value, data } => {
+                    if let Some(data) = data {
                         self.host.write_registry(key, value, data)?;
                     }
                 }
@@ -433,6 +559,37 @@ fn parse_command_exe(cmd: &str) -> String {
     c.split(" %").next().unwrap_or(c).trim().to_string()
 }
 
+// ---- rollback backup ----------------------------------------------------
+
+/// Monotonic counter making rollback temp-dir names unique within this process.
+static BACKUP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A single backed-up live artifact, enough to restore the prior state.
+enum BackupItem {
+    /// A file/dir/glob copied under `rel` in the backup dir (`live` is expanded).
+    /// A missing `rel` copy means the artifact was absent and should stay absent.
+    File { live: String, rel: String },
+    /// A registry value; `data == None` means it was absent at backup time.
+    Registry {
+        key: String,
+        value: String,
+        data: Option<String>,
+    },
+}
+
+/// A throwaway snapshot of the live login used to roll back a failed restore.
+/// Removes its temp directory when dropped (on success or after rollback).
+struct LiveBackup {
+    dir: PathBuf,
+    items: Vec<BackupItem>,
+}
+
+impl Drop for LiveBackup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 // ---- file helpers -------------------------------------------------------
 
 /// Copy a live path (possibly a glob or directory) into the saved location.
@@ -536,4 +693,331 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::os::stub::StubHost;
+
+    const IDS_KEY: &str = "HKCU\\Test\\Ids";
+    const EPIC_IDS_KEY: &str = "HKCU\\Software\\Epic Games\\Unreal Engine\\Identifiers";
+
+    /// A unique temp directory that cleans itself up on drop.
+    struct TempDir {
+        path: PathBuf,
+    }
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let seq = BACKUP_SEQ.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("p2-test-{}-{}-{}", tag, std::process::id(), seq));
+            std::fs::create_dir_all(&path).unwrap();
+            TempDir { path }
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn acct(id: &str) -> Account {
+        Account {
+            id: id.into(),
+            display_name: id.into(),
+            note: None,
+            image: None,
+            last_used: None,
+        }
+    }
+
+    /// A generic file+registry platform whose account id is its `AccountId` value.
+    fn generic_plat(live_root: &Path) -> PlatformDef {
+        let live = live_root.join("login.dat").to_string_lossy().to_string();
+        PlatformDef {
+            id: "testplat".into(),
+            name: "Test".into(),
+            exe_default: None,
+            exe_locators: vec![],
+            exe_args: None,
+            exes_to_end: vec![],
+            login: vec![
+                LoginArtifact::File {
+                    live,
+                    saved: "login.dat".into(),
+                },
+                LoginArtifact::Registry {
+                    key: IDS_KEY.into(),
+                    value: "AccountId".into(),
+                    saved: "accountid".into(),
+                },
+                LoginArtifact::Registry {
+                    key: IDS_KEY.into(),
+                    value: "Token".into(),
+                    saved: "token".into(),
+                },
+            ],
+            clear: vec![],
+            unique_id: UniqueId::Registry {
+                key: IDS_KEY.into(),
+                value: "AccountId".into(),
+            },
+        }
+    }
+
+    /// Make `account_id` the live login: write its file data and registry values.
+    fn set_live(host: &StubHost, plat: &PlatformDef, data: &str, account_id: &str) {
+        for artifact in &plat.login {
+            if let LoginArtifact::File { live, .. } = artifact {
+                let p = PathBuf::from(live);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, data).unwrap();
+            }
+        }
+        host.set_registry(IDS_KEY, "AccountId", account_id);
+        host.set_registry(IDS_KEY, "Token", &format!("tok-{account_id}"));
+    }
+
+    fn engine_at(host: &StubHost, root: &Path) -> Engine {
+        Engine::new(Box::new(host.clone()), Store::new(root.to_path_buf()))
+    }
+
+    #[test]
+    fn full_switch_roundtrip() {
+        let tmp = TempDir::new("rt");
+        let live = tmp.path.join("live");
+        let root = tmp.path.join("store");
+        let host = StubHost::new();
+        let plat = generic_plat(&live);
+        let engine = engine_at(&host, &root);
+
+        engine.store().upsert_account("testplat", acct("idA")).unwrap();
+        engine.store().upsert_account("testplat", acct("idB")).unwrap();
+
+        set_live(&host, &plat, "A-data", "idA");
+        engine.capture_login(&plat, "idA").unwrap();
+        set_live(&host, &plat, "B-data", "idB");
+        engine.capture_login(&plat, "idB").unwrap();
+
+        // Live is B; switch to A.
+        let out = engine.switch(&plat, "idA", false).unwrap();
+        assert!(out.switched && !out.already_active);
+        assert_eq!(
+            std::fs::read_to_string(live.join("login.dat")).unwrap(),
+            "A-data"
+        );
+        assert_eq!(host.get_registry(IDS_KEY, "AccountId").as_deref(), Some("idA"));
+        assert_eq!(engine.current_id(&plat).unwrap().as_deref(), Some("idA"));
+    }
+
+    #[test]
+    fn already_active_short_circuits() {
+        let tmp = TempDir::new("active");
+        let live = tmp.path.join("live");
+        let root = tmp.path.join("store");
+        let host = StubHost::new();
+        let plat = generic_plat(&live);
+        let engine = engine_at(&host, &root);
+
+        engine.store().upsert_account("testplat", acct("idA")).unwrap();
+        set_live(&host, &plat, "A-data", "idA");
+        engine.capture_login(&plat, "idA").unwrap();
+
+        let out = engine.switch(&plat, "idA", false).unwrap();
+        assert!(out.already_active && !out.switched);
+        // Nothing was disturbed.
+        assert_eq!(
+            std::fs::read_to_string(live.join("login.dat")).unwrap(),
+            "A-data"
+        );
+    }
+
+    #[test]
+    fn failed_restore_rolls_back() {
+        let tmp = TempDir::new("rollback");
+        let live = tmp.path.join("live");
+        let root = tmp.path.join("store");
+        let host = StubHost::new();
+        let plat = generic_plat(&live);
+        let engine = engine_at(&host, &root);
+
+        engine.store().upsert_account("testplat", acct("idA")).unwrap();
+        engine.store().upsert_account("testplat", acct("idB")).unwrap();
+        set_live(&host, &plat, "A-data", "idA");
+        engine.capture_login(&plat, "idA").unwrap();
+        set_live(&host, &plat, "B-data", "idB");
+        engine.capture_login(&plat, "idB").unwrap();
+
+        // Restoring A writes AccountId=idA — make that write fail mid-restore.
+        host.fail_registry_write_data("idA");
+        let err = engine.switch(&plat, "idA", false);
+        assert!(err.is_err(), "switch should fail when restore fails");
+
+        // Rolled back to B: live file and registry are B's again.
+        assert_eq!(
+            std::fs::read_to_string(live.join("login.dat")).unwrap(),
+            "B-data"
+        );
+        assert_eq!(host.get_registry(IDS_KEY, "AccountId").as_deref(), Some("idB"));
+    }
+
+    #[test]
+    fn capture_failure_aborts_before_clear() {
+        let tmp = TempDir::new("capfail");
+        let live = tmp.path.join("live");
+        let root = tmp.path.join("store");
+        let host = StubHost::new();
+        let plat = generic_plat(&live);
+        let engine = engine_at(&host, &root);
+
+        engine.store().upsert_account("testplat", acct("idA")).unwrap();
+        engine.store().upsert_account("testplat", acct("idB")).unwrap();
+        set_live(&host, &plat, "B-data", "idB");
+        engine.capture_login(&plat, "idB").unwrap();
+
+        // Capturing the outgoing account reads the Token value; make it fail.
+        host.fail_registry_read("Token");
+        let err = engine.switch(&plat, "idA", false);
+        assert!(err.is_err(), "switch should abort when capture fails");
+
+        // Live login for B is untouched — clear never ran.
+        assert_eq!(
+            std::fs::read_to_string(live.join("login.dat")).unwrap(),
+            "B-data"
+        );
+        assert_eq!(host.get_registry(IDS_KEY, "AccountId").as_deref(), Some("idB"));
+    }
+
+    #[test]
+    fn corrupt_accounts_json_errors_not_empty() {
+        let tmp = TempDir::new("corrupt");
+        let root = tmp.path.join("store");
+        let store = Store::new(root.clone());
+        let dir = root.join("accounts").join("testplat");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("accounts.json"), "{ not valid json").unwrap();
+        assert!(store.list_accounts("testplat").is_err());
+    }
+
+    #[test]
+    fn legacy_array_reads_and_migrates_to_versioned() {
+        let tmp = TempDir::new("legacy");
+        let root = tmp.path.join("store");
+        let store = Store::new(root.clone());
+        let dir = root.join("accounts").join("testplat");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Legacy pre-versioning format: a bare array.
+        std::fs::write(
+            dir.join("accounts.json"),
+            r#"[{"id":"x","display_name":"X"}]"#,
+        )
+        .unwrap();
+        let a = store.list_accounts("testplat").unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].id, "x");
+
+        // A save rewrites it in the versioned format, still round-tripping.
+        store.upsert_account("testplat", acct("y")).unwrap();
+        let a2 = store.list_accounts("testplat").unwrap();
+        assert_eq!(a2.len(), 2);
+        let txt = std::fs::read_to_string(dir.join("accounts.json")).unwrap();
+        assert!(txt.contains("\"version\""));
+    }
+
+    // ---- Epic-specific ----
+
+    fn epic_ini_path(local_app_data: &Path) -> PathBuf {
+        local_app_data
+            .join("EpicGamesLauncher")
+            .join("Saved")
+            .join("Config")
+            .join("WindowsEditor")
+            .join("GameUserSettings.ini")
+    }
+
+    fn epic_plat() -> PlatformDef {
+        PlatformDef {
+            id: "epic".into(),
+            name: "Epic".into(),
+            exe_default: None,
+            exe_locators: vec![],
+            exe_args: None,
+            exes_to_end: vec![],
+            login: vec![],
+            clear: vec![],
+            unique_id: UniqueId::Registry {
+                key: EPIC_IDS_KEY.into(),
+                value: "AccountId".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn epic_switch_preserves_unrelated_ini_sections() {
+        let tmp = TempDir::new("epicini");
+        let lad = tmp.path.join("lad");
+        let host = StubHost::new().with_var("LocalAppData", &lad.to_string_lossy());
+        let store = Store::new(tmp.path.join("store"));
+
+        let ini = epic_ini_path(&lad);
+        std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+        std::fs::write(
+            &ini,
+            "[/Script/Foo]\nBar=1\n\n[RememberMe]\nEnable=True\nData=old\n",
+        )
+        .unwrap();
+
+        let token = "z".repeat(600);
+        let adir = store.account_dir("epic", "acct1");
+        std::fs::create_dir_all(&adir).unwrap();
+        std::fs::write(adir.join("epic_token.txt"), &token).unwrap();
+
+        crate::switcher::epic::switch(&host, &store, "acct1").unwrap();
+
+        let out = std::fs::read_to_string(&ini).unwrap();
+        assert!(out.contains("[/Script/Foo]"), "unrelated section preserved");
+        assert!(out.contains("Bar=1"));
+        assert!(out.contains(&format!("Data={token}")));
+        assert!(!out.contains("Data=old"));
+    }
+
+    #[test]
+    fn epic_switch_captures_rotated_token_before_switching_away() {
+        let tmp = TempDir::new("epicrot");
+        let lad = tmp.path.join("lad");
+        let root = tmp.path.join("store");
+        let host = StubHost::new().with_var("LocalAppData", &lad.to_string_lossy());
+
+        // Outgoing account is live with a freshly-rotated token.
+        let fresh = "f".repeat(600);
+        let ini = epic_ini_path(&lad);
+        std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+        std::fs::write(&ini, format!("[RememberMe]\nEnable=True\nData={fresh}\n")).unwrap();
+        host.set_registry(EPIC_IDS_KEY, "AccountId", "idOut");
+
+        let engine = engine_at(&host, &root);
+        engine.store().upsert_account("epic", acct("idOut")).unwrap();
+        engine.store().upsert_account("epic", acct("idIn")).unwrap();
+
+        // Incoming account already has a saved token so the switch can complete.
+        let store = Store::new(root.clone());
+        let indir = store.account_dir("epic", "idIn");
+        std::fs::create_dir_all(&indir).unwrap();
+        let in_token = "i".repeat(600);
+        std::fs::write(indir.join("epic_token.txt"), &in_token).unwrap();
+
+        let out = engine.switch_epic(&epic_plat(), "idIn", false).unwrap();
+        assert!(out.switched);
+
+        // The outgoing account's rotated token was saved before being overwritten.
+        let saved_out =
+            std::fs::read_to_string(store.account_dir("epic", "idOut").join("epic_token.txt"))
+                .unwrap();
+        assert_eq!(saved_out, fresh);
+
+        // The live INI now carries the incoming account's token.
+        let ini_txt = std::fs::read_to_string(&ini).unwrap();
+        assert!(ini_txt.contains(&format!("Data={in_token}")));
+    }
 }

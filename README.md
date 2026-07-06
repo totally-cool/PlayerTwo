@@ -35,8 +35,11 @@ then swaps them in and out while the app is closed.
 
 ## Features
 
-- One-click switching with the active account highlighted
-- **Import current login** (non-destructive) or **New profile** (log out → fresh sign-in)
+- One-click switching with the active account highlighted and **per-card progress**
+  (Closing → Swapping → Launching) plus an inline **Retry** if a switch aborts
+- **Import current login** (non-destructive) or **New profile** (log out → fresh sign-in),
+  with a confirmation before clearing a live login that isn't saved yet
+- Accounts sorted **most-recently-used first**; Epic cards show login freshness + refresh
 - Per-account avatars, display names, and notes
 - Auto-detection of installed platforms (+ manual enable for any platform)
 - Card-grid or compact list views; collapsible per-platform groups
@@ -70,19 +73,29 @@ Albion Online · Arena Breakout: Infinite · Delta Force: Hawk Ops
 | Platform | Mechanism |
 |---|---|
 | **Steam** | Reads accounts from Steam's own `loginusers.vdf`; switching flips the `MostRecent`/`AutoLoginUser` flags. Needs "remember password" set once per account. |
-| **Epic** | Saves the `[RememberMe]` token per account and writes it back on switch (no logout needed). |
+| **Epic** | Saves the rotating `[RememberMe]` token per account and writes it back on switch (no logout needed). Only the `[RememberMe]` section of `GameUserSettings.ini` is edited — other settings are preserved — and the outgoing account's freshly-rotated token is re-saved before switching away. |
 | **Everything else** | Captures the platform's login files/registry into the store, then swaps the chosen profile in (closing the app first). |
 
 The generic switch (engine, `src-tauri/src/switcher/engine.rs`):
-1. Kill the platform's processes (so files aren't locked) and wait for exit.
-2. Detect the current account; if it's a saved one, refresh its snapshot.
-3. Clear the live login.
-4. Restore the target account's files + registry values.
-5. Relaunch the platform.
+1. Close the platform's processes — WM_CLOSE first so a launcher can flush its
+   files, then a hard kill as a fallback — and wait for exit. **If the app won't
+   close, the switch aborts** rather than racing its shutdown writes.
+2. Detect the current account; if it's a saved one, refresh its snapshot. A failed
+   capture aborts the switch *before* anything is cleared, so a login is never lost.
+3. Back up the live login (files + registry) to a temp location.
+4. Clear the live login.
+5. Restore the target account's files + registry values. **If the restore fails, the
+   backup is rolled back** so you're never left logged out.
+6. Relaunch the platform.
+
+Durability: the saved-account store uses atomic writes (temp-file + rename) and a
+cross-process lockfile, so a store on a NAS/SMB share stays consistent even if two
+PCs point at it. A corrupt `accounts.json` surfaces as an error instead of silently
+being treated as "no accounts".
 
 ## Install
 
-**⬇ [Download PlayerTwo 0.1.3 — Windows installer (.exe)](https://github.com/totally-cool/PlayerTwo/releases/download/v0.1.3/PlayerTwo_0.1.3_x64-setup.exe)**
+**⬇ [Download PlayerTwo 0.1.4 — Windows installer (.exe)](https://github.com/totally-cool/PlayerTwo/releases/download/v0.1.4/PlayerTwo_0.1.4_x64-setup.exe)**
 
 Or browse every build (`.msi` included) on the [**Releases**](https://github.com/totally-cool/PlayerTwo/releases/latest) page.
 Windows may show a SmartScreen warning until the app is code-signed — click "More info → Run anyway".

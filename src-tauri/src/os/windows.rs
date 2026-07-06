@@ -116,6 +116,38 @@ impl Host for WindowsHost {
         let targets: Vec<String> = exe_names.iter().map(|n| n.to_ascii_lowercase()).collect();
         let mut sys = System::new();
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+        // Collect the PIDs of the matching processes up front.
+        let pids: std::collections::HashSet<u32> = sys
+            .processes()
+            .iter()
+            .filter(|(_, p)| {
+                let name = p.name().to_string_lossy().to_ascii_lowercase();
+                targets.iter().any(|t| *t == name)
+            })
+            .map(|(pid, _)| pid.as_u32())
+            .collect();
+        if pids.is_empty() {
+            return Ok(());
+        }
+
+        // 1. Ask nicely first: WM_CLOSE to each top-level window. Killing a
+        //    launcher mid-write corrupts its own login files, so give it a moment
+        //    to flush and exit cleanly before resorting to TerminateProcess.
+        #[cfg(windows)]
+        graceful_close(&pids);
+
+        // 2. Wait briefly for the graceful close to take effect (~1.5s).
+        for _ in 0..15 {
+            if !self.are_running(exe_names) {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        // 3. Force-kill whatever is still alive.
+        let mut sys = System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
         for proc in sys.processes().values() {
             let name = proc.name().to_string_lossy().to_ascii_lowercase();
             if targets.iter().any(|t| *t == name) {
@@ -162,5 +194,62 @@ impl Host for WindowsHost {
                 .with_context(|| format!("launch {exe}"))?;
         }
         Ok(())
+    }
+}
+
+/// Post `WM_CLOSE` to every top-level window owned by one of `pids`, asking those
+/// processes to shut down cleanly (flushing any in-flight writes) before a caller
+/// resorts to a hard kill. Best-effort: windowless/background processes are simply
+/// left for the fallback `TerminateProcess`.
+///
+/// Uses raw `user32` FFI to avoid pulling in a heavyweight Windows-API crate.
+#[cfg(windows)]
+fn graceful_close(pids: &std::collections::HashSet<u32>) {
+    use std::ffi::c_void;
+
+    type Hwnd = *mut c_void;
+    type Lparam = isize;
+    type Wparam = usize;
+    type Bool = i32;
+    type Dword = u32;
+
+    const WM_CLOSE: u32 = 0x0010;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(cb: extern "system" fn(Hwnd, Lparam) -> Bool, lparam: Lparam) -> Bool;
+        fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut Dword) -> Dword;
+        fn PostMessageW(hwnd: Hwnd, msg: u32, wparam: Wparam, lparam: Lparam) -> Bool;
+    }
+
+    // Passed by raw pointer through `EnumWindows`'s LPARAM to the callback.
+    struct Ctx<'a> {
+        targets: &'a std::collections::HashSet<u32>,
+        hwnds: Vec<Hwnd>,
+    }
+
+    extern "system" fn enum_cb(hwnd: Hwnd, lparam: Lparam) -> Bool {
+        // SAFETY: `lparam` is the `&mut Ctx` we handed to `EnumWindows` below, and
+        // the callback only runs during that synchronous call.
+        let ctx = unsafe { &mut *(lparam as *mut Ctx) };
+        let mut pid: Dword = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        if ctx.targets.contains(&pid) {
+            ctx.hwnds.push(hwnd);
+        }
+        1 // TRUE: keep enumerating
+    }
+
+    let mut ctx = Ctx {
+        targets: pids,
+        hwnds: Vec::new(),
+    };
+    // SAFETY: FFI into user32; `enum_cb` matches the WNDENUMPROC signature and the
+    // context pointer outlives the (synchronous) enumeration.
+    unsafe {
+        EnumWindows(enum_cb, &mut ctx as *mut Ctx as Lparam);
+        for hwnd in ctx.hwnds {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
     }
 }

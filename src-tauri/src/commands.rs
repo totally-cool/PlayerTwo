@@ -79,6 +79,23 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Overlay the platform's most-recently-used timestamps onto `accounts` and sort
+/// most-recently-used first, keeping the stored (manual) order as the tiebreaker.
+fn apply_mru(store: &Store, platform: &str, accounts: Vec<Account>) -> Vec<Account> {
+    let mru = store.load_last_used(platform);
+    let mut indexed: Vec<(usize, Account)> = accounts
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut a)| {
+            a.last_used = mru.get(&a.id).copied();
+            (i, a)
+        })
+        .collect();
+    // Higher timestamp first; `None` sorts last; equal/none keep original order.
+    indexed.sort_by(|(ia, a), (ib, b)| b.last_used.cmp(&a.last_used).then(ia.cmp(ib)));
+    indexed.into_iter().map(|(_, a)| a).collect()
+}
+
 // ---- data dir persistence ----------------------------------------------
 
 pub fn default_data_dir() -> PathBuf {
@@ -212,7 +229,7 @@ pub async fn list_accounts(
         if platform == "steam" {
             // Accounts come live from Steam; overlay any saved name/note/image.
             let overrides = engine.store().list_accounts("steam").unwrap_or_default();
-            let merged = engine
+            let merged: Vec<Account> = engine
                 .steam_accounts()
                 .into_iter()
                 .map(|mut a| {
@@ -224,9 +241,10 @@ pub async fn list_accounts(
                     a
                 })
                 .collect();
-            return Ok(merged);
+            return Ok(apply_mru(engine.store(), "steam", merged));
         }
-        engine.store().list_accounts(&platform).map_err(err)
+        let accounts = engine.store().list_accounts(&platform).map_err(err)?;
+        Ok(apply_mru(engine.store(), &platform, accounts))
     })
     .await
 }
@@ -245,15 +263,32 @@ pub async fn switch_account(
         def.exe_args = None;
     }
     run_engine(dir, move |engine| {
-        if platform == "steam" {
-            return engine.switch_steam(&def, &account_id, auto_start).map_err(err);
+        let outcome = if platform == "steam" {
+            engine.switch_steam(&def, &account_id, auto_start).map_err(err)?
+        } else if platform == "epic" {
+            engine.switch_epic(&def, &account_id, auto_start).map_err(err)?
+        } else {
+            engine.switch(&def, &account_id, auto_start).map_err(err)?
+        };
+        // Remember this as the most recent account for MRU ordering. Non-critical:
+        // a failure here shouldn't fail the (already-completed) switch.
+        if let Err(e) = engine.store().record_last_used(&platform, &account_id, now()) {
+            tracing::debug!(error = %e, "failed to record last-used timestamp");
         }
-        if platform == "epic" {
-            return engine.switch_epic(&def, &account_id, auto_start).map_err(err);
-        }
-        engine.switch(&def, &account_id, auto_start).map_err(err)
+        Ok(outcome)
     })
     .await
+}
+
+/// When the saved Epic login token for an account was last written (unix seconds),
+/// if any. Drives the "login saved <relative time>" hint on Epic cards.
+#[tauri::command]
+pub async fn epic_token_saved_at(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+) -> CmdResult<Option<u64>> {
+    let dir = state.data_dir.lock().unwrap().clone();
+    run_engine(dir, move |engine| Ok(engine.epic_token_saved_at(&account_id))).await
 }
 
 /// The unique id of the account currently logged in on the system, if detectable.
@@ -322,6 +357,7 @@ pub async fn add_current_account(
             display_name,
             note: None,
             image: None,
+            last_used: None,
         };
         engine
             .store()
@@ -361,6 +397,7 @@ pub async fn add_current_account(
             display_name: name,
             note: None,
             image: None,
+            last_used: None,
         };
         engine
             .store()
@@ -406,6 +443,7 @@ pub async fn add_current_account(
         display_name,
         note: None,
         image: None,
+        last_used: None,
     };
     engine
         .store()
