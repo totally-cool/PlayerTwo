@@ -44,7 +44,26 @@ pub fn run() {
     // Held until the app exits so buffered logs are flushed.
     let _log_guard = init_logging();
 
-    let mut builder = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // Single-instance must be the FIRST plugin registered. When a second
+    // instance is launched, this callback runs in the already-running
+    // instance instead — we surface its window and let the new process exit.
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("main") {
+                if window.is_minimized().unwrap_or(false) {
+                    let _ = window.unminimize();
+                }
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+
+    builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init());
     #[cfg(desktop)]
