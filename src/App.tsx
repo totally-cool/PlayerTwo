@@ -343,6 +343,10 @@ export default function App() {
   // and the last error for a card, driving an inline Retry action.
   const [switchStep, setSwitchStep] = useState<Record<string, string>>({});
   const [switchError, setSwitchError] = useState<Record<string, string>>({});
+  // Cards whose switch reported success but whose launcher never signed in —
+  // Epic discards a RememberMe token it no longer accepts without telling anyone,
+  // so this is the only way the user finds out retrying is pointless.
+  const [rejectedLogin, setRejectedLogin] = useState<Record<string, boolean>>({});
   const stepTimers = useRef<Record<string, number[]>>({});
   // Epic token freshness: accountId -> unix seconds the token was last saved.
   const [epicTokenAt, setEpicTokenAt] = useState<Record<string, number | null>>({});
@@ -408,6 +412,12 @@ export default function App() {
         await api.renewActiveTokens();
         const at = await api.epicTokenSavedAt(accountId);
         setEpicTokenAt((prev) => ({ ...prev, [accountId]: at }));
+        // A freshly captured token is exactly what an expired one needed.
+        setRejectedLogin((prev) => {
+          const next = { ...prev };
+          delete next[`epic:${accountId}`];
+          return next;
+        });
         setToast({ msg: "Login token refreshed", sev: "success" });
       } catch (e) {
         setToast({ msg: String(e), sev: "error" });
@@ -438,7 +448,7 @@ export default function App() {
   // The launcher applies the login change asynchronously (and may rewrite files
   // as it relaunches), so a single read right after a switch can still see the
   // old account. Poll a few times with backoff until the detection settles.
-  const pollCurrentAfterSwitch = useCallback((platformId: string) => {
+  const pollCurrentAfterSwitch = useCallback((platformId: string, expectedId: string) => {
     const seq = ++switchSeq.current;
     for (const ms of [1000, 2500, 5000, 9000]) {
       setTimeout(async () => {
@@ -454,6 +464,31 @@ export default function App() {
         }
       }, ms);
     }
+
+    // Epic applies the login asynchronously and, when the saved token has
+    // expired, throws it away without any error — the switch looks like a
+    // success while the launcher sits on its sign-in screen. Once the polling
+    // window has closed, ask the backend whether the sign-in was ever confirmed.
+    if (platformId !== "epic") return;
+    setTimeout(async () => {
+      if (switchSeq.current !== seq) return;
+      try {
+        const rejected = await api.epicUnconfirmedSwitch();
+        if (rejected !== expectedId || switchSeq.current !== seq) return;
+        const key = `${platformId}:${expectedId}`;
+        setRejectedLogin((prev) => ({ ...prev, [key]: true }));
+        // Undo the optimistic highlight: this account is not actually active.
+        setCurrentByPlatform((prev) =>
+          prev[platformId] === expectedId ? { ...prev, [platformId]: null } : prev,
+        );
+        setToast({
+          msg: "Epic rejected this saved login — it has expired. Sign in to Epic by hand once, then use Refresh login.",
+          sev: "error",
+        });
+      } catch {
+        /* detection is advisory; stay quiet if it fails */
+      }
+    }, 12000);
   }, []);
 
   useEffect(() => {
@@ -529,6 +564,11 @@ export default function App() {
       delete next[key];
       return next;
     });
+    setRejectedLogin((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
     setSwitchStep((prev) => ({ ...prev, [key]: SWITCH_STEPS[0] }));
     clearStepTimers(key);
     stepTimers.current[key] = [
@@ -558,7 +598,7 @@ export default function App() {
       // Keep checking for a few seconds — the launcher applies the change (and
       // may rewrite its login files) after relaunch, so the active account can
       // settle a moment later.
-      pollCurrentAfterSwitch(platformId);
+      pollCurrentAfterSwitch(platformId, acc.id);
       if (settings?.minimize_after_switch) {
         try {
           await getCurrentWindow().minimize();
@@ -731,6 +771,7 @@ export default function App() {
     const key = `${pid}:${acc.id}`;
     const step = switchStep[key];
     const error = switchError[key];
+    const rejected = rejectedLogin[key];
     const busy = !!step;
     const isEpic = pid === "epic";
     const tokenAt = isEpic ? epicTokenAt[acc.id] : undefined;
@@ -738,9 +779,11 @@ export default function App() {
       ? "Switch failed — tap retry"
       : busy
         ? step
-        : isEpic && tokenAt
-          ? `login saved ${relativeTime(tokenAt)}`
-          : acc.note || undefined;
+        : rejected
+          ? "Login expired — sign in to Epic once, then refresh"
+          : isEpic && tokenAt
+            ? `login saved ${relativeTime(tokenAt)}`
+            : acc.note || undefined;
     return (
       <ListItem
         key={key}
@@ -788,7 +831,15 @@ export default function App() {
                 <Typography
                   component="span"
                   variant="body2"
-                  sx={{ color: error ? "error.main" : busy ? "primary.main" : "text.secondary" }}
+                  sx={{
+                    color: error
+                      ? "error.main"
+                      : busy
+                        ? "primary.main"
+                        : rejected
+                          ? "warning.main"
+                          : "text.secondary",
+                  }}
                 >
                   {secondaryText}
                 </Typography>
@@ -809,6 +860,7 @@ export default function App() {
     const key = `${pid}:${acc.id}`;
     const step = switchStep[key];
     const error = switchError[key];
+    const rejected = rejectedLogin[key];
     const busy = !!step;
     const isEpic = pid === "epic";
     const tokenAt = isEpic ? epicTokenAt[acc.id] : undefined;
@@ -819,9 +871,9 @@ export default function App() {
         sx={{
           position: "relative",
           borderRadius: 2,
-          border: isActive ? 2 : 0,
+          border: isActive || rejected ? 2 : 0,
           borderStyle: "solid",
-          borderColor: error ? "error.main" : "primary.main",
+          borderColor: error ? "error.main" : rejected ? "warning.main" : "primary.main",
           transition: "box-shadow 150ms ease, transform 150ms ease",
           "&:hover": { boxShadow: 8, transform: "translateY(-3px)" },
         }}
@@ -859,6 +911,12 @@ export default function App() {
             <Typography variant="caption" color="error" noWrap>
               Switch failed
             </Typography>
+          ) : rejected ? (
+            <Tooltip title="Epic rejected this saved login. Sign in to Epic by hand once, then use Refresh login on the active card.">
+              <Typography variant="caption" color="warning.main" noWrap>
+                Login expired
+              </Typography>
+            </Tooltip>
           ) : isActive ? (
             <Chip size="small" color="warning" label="Active" />
           ) : isEpic && tokenAt ? (

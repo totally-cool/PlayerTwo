@@ -207,6 +207,32 @@ impl Engine {
         crate::switcher::epic::capture(&*self.host, &self.store, account_id)
     }
 
+    /// The Epic account PlayerTwo last switched to whose sign-in the launcher
+    /// never confirmed — i.e. its saved token was rejected. Drives the UI warning.
+    pub fn epic_unconfirmed(&self) -> Option<String> {
+        crate::switcher::epic::unconfirmed_switch(&*self.host)
+    }
+
+    /// Save `account_id`'s live token, unless the live login is an unconfirmed
+    /// token PlayerTwo planted for somebody else — in which case there is nothing
+    /// of this account's to save and capturing would corrupt its saved login.
+    /// Returns whether a capture actually happened.
+    fn capture_epic_if_trustworthy(&self, account_id: &str) -> Result<bool> {
+        if let Some(planted) = self.epic_unconfirmed() {
+            if planted != account_id {
+                tracing::warn!(
+                    account = %account_id,
+                    planted = %planted,
+                    "skipping Epic capture: the live login is an unconfirmed token written for \
+                     another account (its saved token was most likely rejected as expired)"
+                );
+                return Ok(false);
+            }
+        }
+        self.capture_epic(account_id)?;
+        Ok(true)
+    }
+
     /// When the Epic token for `account_id` was last saved (unix seconds).
     pub fn epic_token_saved_at(&self, account_id: &str) -> Option<u64> {
         crate::switcher::epic::token_saved_at(&self.store, account_id)
@@ -219,23 +245,30 @@ impl Engine {
         auto_start: bool,
     ) -> Result<SwitchOutcome> {
         self.ensure_stopped(plat)?;
+        let current = self.epic_current();
+
+        // "Already active" needs a live token as well as a matching `AccountId`:
+        // the registry keeps naming an account after the launcher has signed out
+        // of it, and short-circuiting there would leave the user stuck at a
+        // sign-in screen with no way to re-apply their saved login.
+        if current.as_deref() == Some(account_id) && crate::switcher::epic::has_live_token(&*self.host) {
+            let launched = self.maybe_launch(plat, auto_start)?;
+            return Ok(SwitchOutcome {
+                switched: false,
+                already_active: true,
+                launched,
+                message: "Account is already active".into(),
+            });
+        }
+
         // Epic rotates the RememberMe token every launcher session. Save the
         // outgoing account's *fresh* token before overwriting the INI with the
         // target's, otherwise the stored token goes stale and switching back to
         // that account later fails. Aborting on capture failure is intentional:
         // we must not overwrite a login we failed to save.
-        if let Some(current) = self.epic_current() {
-            if current == account_id {
-                let launched = self.maybe_launch(plat, auto_start)?;
-                return Ok(SwitchOutcome {
-                    switched: false,
-                    already_active: true,
-                    launched,
-                    message: "Account is already active".into(),
-                });
-            }
+        if let Some(current) = current.filter(|c| c != account_id) {
             if self.store.list_accounts("epic")?.iter().any(|a| a.id == current) {
-                self.capture_epic(&current)?;
+                self.capture_epic_if_trustworthy(&current)?;
             }
         }
         crate::switcher::epic::switch(&*self.host, &self.store, account_id)?;
@@ -269,8 +302,10 @@ impl Engine {
         if let Some(id) = self.epic_current() {
             if self.store.list_accounts("epic")?.iter().any(|a| a.id == id) {
                 // Best-effort: renewal is a safe-to-skip refresh (no clear follows),
-                // so a failure here is logged, not fatal.
-                if let Err(e) = self.capture_epic(&id) {
+                // so a failure here is logged, not fatal. The trustworthiness check
+                // matters most here — this runs on every app start, including the
+                // restart right after a rejected switch.
+                if let Err(e) = self.capture_epic_if_trustworthy(&id) {
                     tracing::debug!(error = %e, account = %id, "epic token renew skipped");
                 }
             }
@@ -1032,5 +1067,113 @@ mod tests {
         // The live INI now carries the incoming account's token.
         let ini_txt = std::fs::read_to_string(&ini).unwrap();
         assert!(ini_txt.contains(&format!("Data={in_token}")));
+    }
+
+    /// Build an Epic scenario: three saved accounts, `live` signed in with a
+    /// token of its own. Returns (tempdir, host, store root, ini path).
+    fn epic_fixture(tag: &str, live: &str, live_token: &str) -> (TempDir, StubHost, PathBuf, PathBuf) {
+        let tmp = TempDir::new(tag);
+        let lad = tmp.path.join("lad");
+        let root = tmp.path.join("store");
+        let host = StubHost::new().with_var("LocalAppData", &lad.to_string_lossy());
+        let ini = epic_ini_path(&lad);
+        std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+        std::fs::write(&ini, format!("[RememberMe]\nEnable=True\nData={live_token}\n")).unwrap();
+        host.set_registry(EPIC_IDS_KEY, "AccountId", live);
+        (tmp, host, root, ini)
+    }
+
+    /// Give `account_id` a saved token so a switch to it can complete.
+    fn seed_epic_token(root: &Path, account_id: &str, token: &str) {
+        let dir = Store::new(root.to_path_buf()).account_dir("epic", account_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("epic_token.txt"), token).unwrap();
+    }
+
+    fn saved_epic_token(root: &Path, account_id: &str) -> String {
+        let dir = Store::new(root.to_path_buf()).account_dir("epic", account_id);
+        std::fs::read_to_string(dir.join("epic_token.txt")).unwrap()
+    }
+
+    /// The corruption this guard exists for: switching to B writes B's token while
+    /// the registry still says A (the launcher rejected it and never signed in).
+    /// A later switch to C must not then save B's token as A's.
+    #[test]
+    fn epic_rejected_switch_does_not_misfile_the_planted_token() {
+        let a_token = "a".repeat(600);
+        let b_token = "b".repeat(700);
+        let c_token = "c".repeat(800);
+        let (_tmp, host, root, _ini) = epic_fixture("epicmisfile", "idA", &a_token);
+
+        let engine = engine_at(&host, &root);
+        for id in ["idA", "idB", "idC"] {
+            engine.store().upsert_account("epic", acct(id)).unwrap();
+        }
+        seed_epic_token(&root, "idA", &a_token);
+        seed_epic_token(&root, "idB", &b_token);
+        seed_epic_token(&root, "idC", &c_token);
+
+        // Switch to B. B's token lands in the INI; the launcher never signs in, so
+        // `AccountId` stays on A.
+        engine.switch_epic(&epic_plat(), "idB", false).unwrap();
+        assert_eq!(engine.epic_unconfirmed().as_deref(), Some("idB"));
+
+        // Now switch to C. The outgoing "current" account is still A by the
+        // registry, but the live token is B's — A must be left alone.
+        engine.switch_epic(&epic_plat(), "idC", false).unwrap();
+        assert_eq!(
+            saved_epic_token(&root, "idA"),
+            a_token,
+            "A's saved token must survive an unconfirmed switch to another account"
+        );
+        assert_eq!(saved_epic_token(&root, "idB"), b_token, "B's token untouched");
+    }
+
+    /// The same guard must not block the normal path: once the launcher confirms
+    /// the sign-in, captures work again.
+    #[test]
+    fn epic_confirmed_switch_clears_the_pending_record() {
+        let a_token = "a".repeat(600);
+        let b_token = "b".repeat(700);
+        let (_tmp, host, root, ini) = epic_fixture("epicconfirm", "idA", &a_token);
+
+        let engine = engine_at(&host, &root);
+        engine.store().upsert_account("epic", acct("idA")).unwrap();
+        engine.store().upsert_account("epic", acct("idB")).unwrap();
+        seed_epic_token(&root, "idB", &b_token);
+
+        engine.switch_epic(&epic_plat(), "idB", false).unwrap();
+        assert_eq!(engine.epic_unconfirmed().as_deref(), Some("idB"));
+
+        // The launcher signs in and rotates the token, as it does every session.
+        host.set_registry(EPIC_IDS_KEY, "AccountId", "idB");
+        let rotated = "r".repeat(900);
+        std::fs::write(&ini, format!("[RememberMe]\nEnable=True\nData={rotated}\n")).unwrap();
+
+        assert!(engine.epic_unconfirmed().is_none(), "confirmed switch clears the record");
+        // And switching away now saves B's *rotated* token, as it always has.
+        seed_epic_token(&root, "idA", &a_token);
+        engine.switch_epic(&epic_plat(), "idA", false).unwrap();
+        assert_eq!(saved_epic_token(&root, "idB"), rotated);
+    }
+
+    /// `AccountId` outliving a sign-out must not short-circuit as "already
+    /// active" — that left the user stuck at Epic's login screen with the switch
+    /// button doing nothing.
+    #[test]
+    fn epic_reapplies_token_when_account_id_is_stale() {
+        let a_token = "a".repeat(600);
+        // Signed out: the launcher leaves a short placeholder behind.
+        let (_tmp, host, root, ini) = epic_fixture("epicstale", "idA", "shortstub");
+
+        let engine = engine_at(&host, &root);
+        engine.store().upsert_account("epic", acct("idA")).unwrap();
+        seed_epic_token(&root, "idA", &a_token);
+
+        let out = engine.switch_epic(&epic_plat(), "idA", false).unwrap();
+        assert!(out.switched, "should re-apply the saved login, not report already-active");
+        assert!(!out.already_active);
+        let ini_txt = std::fs::read_to_string(&ini).unwrap();
+        assert!(ini_txt.contains(&format!("Data={a_token}")));
     }
 }
