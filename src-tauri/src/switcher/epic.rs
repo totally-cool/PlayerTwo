@@ -11,11 +11,20 @@
 //! rather than by guessing from file modification times, which could misattribute
 //! a captured token to the wrong account.
 //!
+//! Those two sources — the token in the INI and the id in the registry — are
+//! written by the launcher at *different* times, so they disagree whenever a
+//! switch is applied but the launcher never actually signs in (a rejected/expired
+//! token, or a launcher that was killed first). Capturing in that state files the
+//! planted token under the previous account and silently corrupts both saved
+//! logins. [`unconfirmed_switch`] closes that hole: every write records what was
+//! planted, and a capture is only trusted once the launcher has confirmed the
+//! sign-in.
+//!
 //! (Approach inspired by symonxdd/epic-switcher, reimplemented for this schema.)
 
 use crate::os::Host;
 use crate::switcher::store::{atomic_write, Store};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::path::PathBuf;
 
 const PLATFORM: &str = "epic";
@@ -41,6 +50,80 @@ fn logs_dir(host: &dyn Host) -> PathBuf {
     PathBuf::from(host.expand_vars("%LocalAppData%\\EpicGamesLauncher\\Saved\\Logs"))
 }
 
+/// Where the pending-switch record lives. Deliberately machine-local rather than
+/// in the store: the store may sit on a NAS shared by several PCs, but "which
+/// token is currently planted in the INI" is a fact about *this* machine.
+fn pending_path(host: &dyn Host) -> PathBuf {
+    PathBuf::from(host.expand_vars("%LocalAppData%\\PlayerTwo\\epic_pending.json"))
+}
+
+/// A token PlayerTwo wrote into the live INI whose sign-in the launcher has not
+/// confirmed yet.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PendingSwitch {
+    /// The account the token was written for.
+    account_id: String,
+    /// Fingerprint of the exact token written, so we can tell our own planted
+    /// token from a fresh one the launcher minted after a real sign-in.
+    token_fp: String,
+}
+
+/// Stable fingerprint of a token (FNV-1a 64 plus length). Hand-rolled so it stays
+/// identical across builds — `DefaultHasher` is explicitly not stable across
+/// releases, and this value is persisted between runs. It only ever answers "is
+/// this the same string?", so collision resistance is irrelevant; the worst a
+/// collision could do is skip one capture.
+fn fingerprint(token: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in token.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}.{}", token.len())
+}
+
+fn load_pending(host: &dyn Host) -> Option<PendingSwitch> {
+    let text = std::fs::read_to_string(pending_path(host)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn save_pending(host: &dyn Host, pending: &PendingSwitch) -> Result<()> {
+    let text = serde_json::to_string_pretty(pending)?;
+    atomic_write(&pending_path(host), text.as_bytes())
+}
+
+fn clear_pending(host: &dyn Host) {
+    let _ = std::fs::remove_file(pending_path(host));
+}
+
+/// The account whose token PlayerTwo planted in the live INI but which the
+/// launcher never confirmed signing in as — in practice, an expired token Epic
+/// rejected. `None` means the live login can be trusted to belong to whoever
+/// [`current_id`] reports.
+///
+/// Reconciles as a side effect: once the launcher confirms the switch, the record
+/// is dropped so later captures work normally again.
+pub fn unconfirmed_switch(host: &dyn Host) -> Option<String> {
+    let pending = load_pending(host)?;
+    // The launcher flipped `AccountId` to our target: the sign-in took.
+    if current_id(host).as_deref() == Some(pending.account_id.as_str()) {
+        clear_pending(host);
+        return None;
+    }
+    match current_token(host) {
+        // A different token is live, so somebody signed in for real (by hand, or
+        // the launcher rotated ours). The INI is trustworthy again.
+        Some(live) if fingerprint(&live) != pending.token_fp => {
+            clear_pending(host);
+            None
+        }
+        // Our planted token is still sitting there untouched, or the launcher
+        // wiped it back to a stub — either way it was never signed in with, and
+        // `AccountId` still names somebody else.
+        _ => Some(pending.account_id),
+    }
+}
+
 /// Extract a `Data=<token>` value from INI text, if it looks like a real token.
 fn extract_token(text: &str) -> Option<String> {
     for line in text.lines() {
@@ -58,6 +141,13 @@ fn extract_token(text: &str) -> Option<String> {
 pub fn current_token(host: &dyn Host) -> Option<String> {
     let text = std::fs::read_to_string(login_ini(host)).ok()?;
     extract_token(&text)
+}
+
+/// Whether a real login token is present in the live INI. `AccountId` can name an
+/// account the launcher has since signed out of, so "is someone actually logged
+/// in" needs this as well as [`current_id`].
+pub fn has_live_token(host: &dyn Host) -> bool {
+    current_token(host).is_some()
 }
 
 /// The current account's id: Epic's `AccountId` registry GUID. Returns `None`
@@ -103,6 +193,17 @@ fn token_file(store: &Store, account_id: &str) -> PathBuf {
 
 /// Save the currently-active account's token under `account_id`.
 pub fn capture(host: &dyn Host, store: &Store, account_id: &str) -> Result<()> {
+    // Never file a token under an account the launcher hasn't actually signed in
+    // as. Without this a rejected switch leaves account B's token in the INI while
+    // the registry still says A, and the next capture saves B's token as A's.
+    if let Some(planted) = unconfirmed_switch(host) {
+        if planted != account_id {
+            bail!(
+                "the live Epic login is a token PlayerTwo wrote for another account and the \
+                 launcher never signed in with it — sign in to Epic first, then save"
+            );
+        }
+    }
     let token = current_token(host).ok_or_else(|| anyhow!("no valid Epic login token found"))?;
     let dir = store.account_dir(PLATFORM, account_id);
     std::fs::create_dir_all(&dir)?;
@@ -233,6 +334,18 @@ pub fn switch(host: &dyn Host, store: &Store, account_id: &str) -> Result<()> {
     let existing = std::fs::read_to_string(&ini).unwrap_or_default();
     let updated = edit_remember_me(&existing, true, &token);
     atomic_write(&ini, updated.as_bytes()).context("write GameUserSettings.ini")?;
+    // Record what we planted. Until the launcher confirms this sign-in, the INI
+    // and the registry describe different accounts and must not be paired up
+    // (see `unconfirmed_switch`). Non-fatal: the write itself already succeeded.
+    if let Err(e) = save_pending(
+        host,
+        &PendingSwitch {
+            account_id: account_id.to_string(),
+            token_fp: fingerprint(&token),
+        },
+    ) {
+        tracing::warn!(error = %e, "could not record the pending Epic switch");
+    }
     tracing::info!(account = account_id, "wrote Epic login token");
     Ok(())
 }
@@ -240,6 +353,9 @@ pub fn switch(host: &dyn Host, store: &Store, account_id: &str) -> Result<()> {
 /// Clear the live login so the launcher shows a fresh sign-in — surgically, so
 /// only the RememberMe token is removed and other settings are preserved.
 pub fn clear(host: &dyn Host) -> Result<()> {
+    // Nothing is planted any more, so drop any pending record — the next sign-in
+    // is a deliberate fresh one and should capture normally.
+    clear_pending(host);
     let ini = login_ini(host);
     if !ini.exists() {
         return Ok(());

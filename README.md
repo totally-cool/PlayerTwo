@@ -73,7 +73,7 @@ Albion Online · Arena Breakout: Infinite · Delta Force: Hawk Ops
 | Platform | Mechanism |
 |---|---|
 | **Steam** | Reads accounts from Steam's own `loginusers.vdf`; switching flips the `MostRecent`/`AutoLoginUser` flags. Needs "remember password" set once per account. |
-| **Epic** | Saves the rotating `[RememberMe]` token per account and writes it back on switch (no logout needed). Only the `[RememberMe]` section of `GameUserSettings.ini` is edited — other settings are preserved — and the outgoing account's freshly-rotated token is re-saved before switching away. |
+| **Epic** | Saves the rotating `[RememberMe]` token per account and writes it back on switch (no logout needed). Only the `[RememberMe]` section of `GameUserSettings.ini` is edited — other settings are preserved — and the outgoing account's freshly-rotated token is re-saved before switching away. Because the token (a file) and the account id (a registry value) are written by the launcher at different moments, PlayerTwo records what it planted and only trusts a capture once the launcher has confirmed the sign-in; an expired token Epic silently discards is reported as **Login expired** instead of a false success. |
 | **Everything else** | Captures the platform's login files/registry into the store, then swaps the chosen profile in (closing the app first). |
 
 The generic switch (engine, `src-tauri/src/switcher/engine.rs`):
@@ -125,6 +125,9 @@ Frontend-only checks (no Rust): `npm run build`.
   or **New profile** to log out and sign into a different account first.
 - **Switch:** click an account card/row (the app closes the launcher, swaps, and relaunches).
 - **Manage:** the **⋮** on a card opens profile settings (name, note, avatar, delete).
+- **"Login expired" on an Epic card:** Epic refused the saved token (they expire, and
+  retrying re-sends the same dead one). Sign into that account in Epic by hand once,
+  then hit **Refresh login** (↻) on its card to capture a fresh token.
 - **Settings (⚙, bottom-left):** enable/disable platforms, set the data location,
   toggle auto-launch / minimize-after-switch, enable debug logging, check for updates.
 

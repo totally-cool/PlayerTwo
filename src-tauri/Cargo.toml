@@ -1,6 +1,6 @@
 [package]
 name = "playertwo"
-version = "0.1.6"
+version = "0.1.7"
 description = "A fast, cross-platform game/app account switcher"
 authors = ["you"]
 edition = "2021"

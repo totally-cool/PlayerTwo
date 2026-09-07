@@ -291,6 +291,18 @@ pub async fn epic_token_saved_at(
     run_engine(dir, move |engine| Ok(engine.epic_token_saved_at(&account_id))).await
 }
 
+/// The Epic account PlayerTwo last switched to whose sign-in the launcher never
+/// confirmed, i.e. whose saved token Epic rejected as expired. `None` when the
+/// last switch took. The UI polls this after switching so a silently-discarded
+/// token surfaces as a warning instead of looking like a success.
+#[tauri::command]
+pub async fn epic_unconfirmed_switch(
+    state: tauri::State<'_, AppState>,
+) -> CmdResult<Option<String>> {
+    let dir = state.data_dir.lock().unwrap().clone();
+    run_engine(dir, move |engine| Ok(engine.epic_unconfirmed())).await
+}
+
 /// The unique id of the account currently logged in on the system, if detectable.
 /// Used to highlight the active profile in the UI.
 #[tauri::command]

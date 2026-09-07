@@ -67,6 +67,13 @@ export const api = {
   epicTokenSavedAt: (accountId: string) =>
     invoke<number | null>("epic_token_saved_at", { accountId }),
 
+  /**
+   * The Epic account whose saved token was written but which the launcher never
+   * signed in as — an expired token Epic silently discarded. `null` when the last
+   * switch took.
+   */
+  epicUnconfirmedSwitch: () => invoke<string | null>("epic_unconfirmed_switch"),
+
   addCurrentAccount: (platform: string, displayName: string) =>
     invoke<AddResult>("add_current_account", { platform, displayName }),
 
