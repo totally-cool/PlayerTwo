@@ -50,6 +50,7 @@ Add an object to the array in `src-tauri/src/defs/builtin.json`:
   ],
   "exe_args": null,                   // e.g. "-silent"
   "exes_to_end": ["app.exe", "app-helper.exe"],
+  "exit_timeout_secs": 10,            // optional; how long to wait for those to exit
   "login": [                          // what constitutes a login
     { "kind": "file", "live": "%AppData%\\MyPlatform\\session.dat", "saved": "session.dat" },
     { "kind": "registry", "key": "HKCU\\Software\\My Platform", "value": "Token", "saved": "Token" }
@@ -66,6 +67,10 @@ Add an object to the array in `src-tauri/src/defs/builtin.json`:
 - **`exe_locators`** (`ExeLocator`): `path` · `registry` (+ optional `suffix`) ·
   `app_paths` (Windows "App Paths") · `url_protocol` (reads `HKCR\<scheme>`; also used to
   detect UWP/Store apps).
+- **`exit_timeout_secs`**: how long to wait for `exes_to_end` to actually exit before
+  aborting the switch (default 10). A launcher that flushes a lot on shutdown needs more —
+  Epic uses 45. Erring high costs nothing on a fast exit; erring low aborts switches, and
+  a launcher half-killed mid-write is how login files end up inconsistent.
 - **`login`** (`LoginArtifact`): `file` (`live` → `saved` relative path) or `registry`
   (`key` + `value` → `saved` name). `saved` is where it's stored inside the account folder.
 - **`unique_id`** (`UniqueId`): how to identify who's logged in now —
@@ -76,6 +81,15 @@ Add an object to the array in `src-tauri/src/defs/builtin.json`:
 
 Steam and Epic don't use the generic engine — see `steam.rs` / `epic.rs` and the
 branches in `commands.rs`.
+
+> **Gotcha for rotating-token platforms.** If "who is logged in" and "the login itself"
+> come from two different places (Epic: a registry GUID and an INI file), the launcher
+> writes them at different moments and they *will* disagree — whenever a switch is applied
+> but no sign-in follows, because the token expired or the launcher was killed first.
+> Pairing them in that state files the wrong token under the wrong account and corrupts
+> both saved logins, irreversibly and silently. Record what you wrote and only trust a
+> capture once the platform has confirmed the sign-in; `epic.rs::unconfirmed_switch` is
+> the worked example.
 
 ### Verify before submitting
 
@@ -90,5 +104,7 @@ branches in `commands.rs`.
 - **License:** PlayerTwo is GPL-3.0-or-later. Contributions are accepted under the same
   license. Don't copy code/assets from incompatibly-licensed projects.
 - Keep OS-specific code behind `Host`.
-- Run `npm run build` (frontend) and `cargo build` (in `src-tauri`) before opening a PR.
+- Run `npm run build` (frontend) and `cargo test --lib` (in `src-tauri`) before opening a
+  PR. Engine tests drive a `StubHost` — an in-memory registry, injectable `%VARS%`, and a
+  modelled process list — so switch logic is testable without touching the real machine.
 - Be honest about platform caveats — a half-working switch should say so in the UI note.

@@ -39,7 +39,9 @@ then swaps them in and out while the app is closed.
   (Closing → Swapping → Launching) plus an inline **Retry** if a switch aborts
 - **Import current login** (non-destructive) or **New profile** (log out → fresh sign-in),
   with a confirmation before clearing a live login that isn't saved yet
-- Accounts sorted **most-recently-used first**; Epic cards show login freshness + refresh
+- Accounts sorted **most-recently-used first**; Epic cards show login freshness + refresh,
+  and flag a saved token the launcher rejected as **Login expired** rather than reporting
+  a switch that silently didn't happen
 - Per-account avatars, display names, and notes
 - Auto-detection of installed platforms (+ manual enable for any platform)
 - Card-grid or compact list views; collapsible per-platform groups
@@ -91,13 +93,17 @@ The generic switch (engine, `src-tauri/src/switcher/engine.rs`):
 Durability: the saved-account store uses atomic writes (temp-file + rename) and a
 cross-process lockfile, so a store on a NAS/SMB share stays consistent even if two
 PCs point at it. A corrupt `accounts.json` surfaces as an error instead of silently
-being treated as "no accounts".
+being treated as "no accounts". Anything describing the *local* machine's live login
+state — such as Epic's pending-switch record — deliberately stays out of the shared
+store, since it isn't true for the other PCs pointing at it.
 
 ## Install
 
-**⬇ [Download PlayerTwo 0.1.5 — Windows installer (.exe)](https://github.com/totally-cool/PlayerTwo/releases/download/v0.1.5/PlayerTwo_0.1.5_x64-setup.exe)**
+**⬇ [Download the latest release](https://github.com/totally-cool/PlayerTwo/releases/latest)** — grab
+`PlayerTwo_<version>_x64-setup.exe` (or the `.msi`) from the assets.
 
-Or browse every build (`.msi` included) on the [**Releases**](https://github.com/totally-cool/PlayerTwo/releases/latest) page.
+Every release is signed for the built-in updater, so an existing install offers the new
+version on its own — or check on demand via Settings (⚙) → Program → **Updates** → *Check*.
 Windows may show a SmartScreen warning until the app is code-signed — click "More info → Run anyway".
 
 ## Build from source
@@ -136,6 +142,10 @@ Frontend-only checks (no Rust): `npm run build`.
 - **Saved accounts** live in `%APPDATA%\PlayerTwo\accounts\<platform>\` by default
   (changeable in Settings → Data; supports NAS/UNC paths).
 - **No passwords** are read or stored — only the platform's own login tokens/files.
+- **Machine-local state** stays in `%LOCALAPPDATA%\PlayerTwo\` and is never written to a
+  shared store: currently `epic_pending.json`, which records the token PlayerTwo last
+  wrote into Epic's INI so a capture is only trusted once the launcher confirms the
+  sign-in. Safe to delete; it is rebuilt on the next switch.
 - **Logs** are written next to the executable as `playertwo.log` (verbose when
   *Debug logging* is on). Open/copy the path from Settings → Diagnostics.
 - Platform **logos** belong to their respective owners and are used only to identify
