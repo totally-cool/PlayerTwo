@@ -41,10 +41,41 @@ const ACCOUNT_ID_VALUE: &str = "AccountId";
 /// capture (recoverable), whereas accepting junk would store a broken login.
 const MIN_TOKEN_LEN: usize = 500;
 
-fn login_ini(host: &dyn Host) -> PathBuf {
-    PathBuf::from(host.expand_vars(
-        "%LocalAppData%\\EpicGamesLauncher\\Saved\\Config\\WindowsEditor\\GameUserSettings.ini",
-    ))
+const INI_NAME: &str = "GameUserSettings.ini";
+/// The config folder older launchers use, and the one we create if none exists.
+const DEFAULT_INI_SUBDIR: &str = "WindowsEditor";
+
+fn config_dir(host: &dyn Host) -> PathBuf {
+    PathBuf::from(host.expand_vars("%LocalAppData%\\EpicGamesLauncher\\Saved\\Config"))
+}
+
+/// Every `Config\<folder>\GameUserSettings.ini` that exists, newest first.
+///
+/// Launcher builds don't agree on the folder (`WindowsEditor` on some machines,
+/// `Windows` on others), and writing a token into the one the launcher doesn't
+/// read fails silently: the launcher shows the remembered name but never signs
+/// in. So rather than hard-coding one path we work with whatever is there.
+fn login_inis(host: &dyn Host) -> Vec<PathBuf> {
+    let mut found: Vec<(PathBuf, Option<std::time::SystemTime>)> = std::fs::read_dir(config_dir(host))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().join(INI_NAME))
+        .filter(|p| p.is_file())
+        .map(|p| {
+            let modified = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+            (p, modified)
+        })
+        .collect();
+    found.sort_by_key(|f| std::cmp::Reverse(f.1));
+    found.into_iter().map(|(p, _)| p).collect()
+}
+
+/// The INI the launcher most recently wrote — the one holding the live login.
+/// Only the newest is trusted: an older copy in another folder may hold a token
+/// from long ago, and pairing that with the current `AccountId` would misfile it.
+fn live_ini(host: &dyn Host) -> Option<PathBuf> {
+    login_inis(host).into_iter().next()
 }
 fn logs_dir(host: &dyn Host) -> PathBuf {
     PathBuf::from(host.expand_vars("%LocalAppData%\\EpicGamesLauncher\\Saved\\Logs"))
@@ -66,6 +97,9 @@ struct PendingSwitch {
     /// Fingerprint of the exact token written, so we can tell our own planted
     /// token from a fresh one the launcher minted after a real sign-in.
     token_fp: String,
+    /// Another PC that had this account's token out at the time — see [`InUse`].
+    #[serde(default)]
+    displaced_from: Option<String>,
 }
 
 /// Stable fingerprint of a token (FNV-1a 64 plus length). Hand-rolled so it stays
@@ -139,7 +173,7 @@ fn extract_token(text: &str) -> Option<String> {
 
 /// The current live RememberMe token, if a valid one is present.
 pub fn current_token(host: &dyn Host) -> Option<String> {
-    let text = std::fs::read_to_string(login_ini(host)).ok()?;
+    let text = std::fs::read_to_string(live_ini(host)?).ok()?;
     extract_token(&text)
 }
 
@@ -208,6 +242,9 @@ pub fn capture(host: &dyn Host, store: &Store, account_id: &str) -> Result<()> {
     let dir = store.account_dir(PLATFORM, account_id);
     std::fs::create_dir_all(&dir)?;
     atomic_write(&token_file(store, account_id), token.as_bytes()).context("write Epic token")?;
+    // The account is live here, so the launcher will retire this token too; the
+    // caller releases the claim once it switches away.
+    mark_in_use(host, store, account_id);
     tracing::debug!(account = account_id, "captured Epic RememberMe token");
     Ok(())
 }
@@ -325,15 +362,34 @@ fn edit_remember_me(existing: &str, enable: bool, token: &str) -> String {
     joined
 }
 
+/// The INIs a login change is written to: every one that exists, oldest first so
+/// the one the launcher was using stays the newest. With none present we create
+/// the classic location.
+fn inis_to_write(host: &dyn Host) -> Vec<PathBuf> {
+    let mut inis = login_inis(host);
+    if inis.is_empty() {
+        inis.push(config_dir(host).join(DEFAULT_INI_SUBDIR).join(INI_NAME));
+    }
+    inis.reverse();
+    inis
+}
+
 /// Write the RememberMe token for `account_id` into Epic's live session file,
 /// preserving the rest of `GameUserSettings.ini`.
 pub fn switch(host: &dyn Host, store: &Store, account_id: &str) -> Result<()> {
     let token = saved_token(store, account_id)
         .ok_or_else(|| anyhow!("no saved token for this account — re-import it"))?;
-    let ini = login_ini(host);
-    let existing = std::fs::read_to_string(&ini).unwrap_or_default();
-    let updated = edit_remember_me(&existing, true, &token);
-    atomic_write(&ini, updated.as_bytes()).context("write GameUserSettings.ini")?;
+    let inis = inis_to_write(host);
+    for ini in &inis {
+        let existing = std::fs::read_to_string(ini).unwrap_or_default();
+        let updated = edit_remember_me(&existing, true, &token);
+        atomic_write(ini, updated.as_bytes())
+            .with_context(|| format!("write {}", ini.display()))?;
+    }
+    // Who had this account's token out before us, if another PC did. Kept with
+    // the pending record so a rejection can say why, after our own marker below
+    // has replaced theirs.
+    let displaced_from = in_use_elsewhere(host, store, account_id).map(|u| u.machine);
     // Record what we planted. Until the launcher confirms this sign-in, the INI
     // and the registry describe different accounts and must not be paired up
     // (see `unconfirmed_switch`). Non-fatal: the write itself already succeeded.
@@ -342,11 +398,17 @@ pub fn switch(host: &dyn Host, store: &Store, account_id: &str) -> Result<()> {
         &PendingSwitch {
             account_id: account_id.to_string(),
             token_fp: fingerprint(&token),
+            displaced_from,
         },
     ) {
         tracing::warn!(error = %e, "could not record the pending Epic switch");
     }
-    tracing::info!(account = account_id, "wrote Epic login token");
+    mark_in_use(host, store, account_id);
+    tracing::info!(
+        account = account_id,
+        files = ?inis,
+        "wrote Epic login token"
+    );
     Ok(())
 }
 
@@ -356,14 +418,87 @@ pub fn clear(host: &dyn Host) -> Result<()> {
     // Nothing is planted any more, so drop any pending record — the next sign-in
     // is a deliberate fresh one and should capture normally.
     clear_pending(host);
-    let ini = login_ini(host);
-    if !ini.exists() {
-        return Ok(());
+    for ini in login_inis(host) {
+        let existing = std::fs::read_to_string(&ini).unwrap_or_default();
+        let cleared = edit_remember_me(&existing, false, "");
+        atomic_write(&ini, cleared.as_bytes())
+            .with_context(|| format!("clear {}", ini.display()))?;
     }
-    let existing = std::fs::read_to_string(&ini).unwrap_or_default();
-    let cleared = edit_remember_me(&existing, false, "");
-    atomic_write(&ini, cleared.as_bytes()).context("clear GameUserSettings.ini")?;
     Ok(())
+}
+
+// ---- Shared-store "in use" marker ----
+//
+// Epic hands out a new RememberMe token every session and retires the old one.
+// When the store is shared between PCs, the token saved for an account is only
+// good until some PC signs in with it; from then until that PC switches away (and
+// saves the replacement), every other PC holds a dead copy. Switching to it there
+// looks like it works — the launcher shows the account's name — but never signs
+// in. The marker records which PC has an account's token out so the others can
+// warn instead of failing silently.
+
+/// Which PC has an account's Epic token checked out, and since when.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct InUse {
+    pub machine: String,
+    /// Unix seconds.
+    pub since: u64,
+}
+
+fn in_use_file(store: &Store, account_id: &str) -> PathBuf {
+    store.account_dir(PLATFORM, account_id).join("in_use.json")
+}
+
+/// This PC's name, as recorded in the marker.
+pub fn this_machine(host: &dyn Host) -> String {
+    let name = host.expand_vars("%COMPUTERNAME%");
+    if name.is_empty() || name.contains('%') {
+        "unknown PC".to_string()
+    } else {
+        name
+    }
+}
+
+fn read_in_use(store: &Store, account_id: &str) -> Option<InUse> {
+    let text = std::fs::read_to_string(in_use_file(store, account_id)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// The marker for `account_id`, if a PC *other than this one* holds its token.
+pub fn in_use_elsewhere(host: &dyn Host, store: &Store, account_id: &str) -> Option<InUse> {
+    read_in_use(store, account_id).filter(|u| !u.machine.eq_ignore_ascii_case(&this_machine(host)))
+}
+
+/// Record that this PC now holds `account_id`'s live token. Best-effort: the
+/// marker is advisory, so failing to write it must not fail a switch.
+pub fn mark_in_use(host: &dyn Host, store: &Store, account_id: &str) {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let marker = InUse { machine: this_machine(host), since };
+    let result = std::fs::create_dir_all(store.account_dir(PLATFORM, account_id))
+        .map_err(anyhow::Error::from)
+        .and_then(|_| Ok(serde_json::to_string_pretty(&marker)?))
+        .and_then(|text| atomic_write(&in_use_file(store, account_id), text.as_bytes()));
+    if let Err(e) = result {
+        tracing::warn!(error = %e, account = account_id, "could not mark Epic account in use");
+    }
+}
+
+/// Drop this PC's claim on `account_id` — its fresh token has been saved, so the
+/// stored copy is good for any PC again. Leaves another PC's marker alone: if
+/// someone switched to the account elsewhere since, that claim is still live.
+pub fn release(host: &dyn Host, store: &Store, account_id: &str) {
+    if read_in_use(store, account_id).is_some() && in_use_elsewhere(host, store, account_id).is_none() {
+        let _ = std::fs::remove_file(in_use_file(store, account_id));
+    }
+}
+
+/// The PC that had the account's token out when this PC last switched to it, if
+/// it was another one — the likely reason the launcher rejected the token.
+pub fn pending_displaced_from(host: &dyn Host) -> Option<String> {
+    load_pending(host)?.displaced_from
 }
 
 #[cfg(test)]
