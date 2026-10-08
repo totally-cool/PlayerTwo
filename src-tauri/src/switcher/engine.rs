@@ -37,6 +37,14 @@ pub struct SwitchOutcome {
     pub message: String,
 }
 
+/// An Epic switch whose saved token the launcher rejected, surfaced to the UI.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EpicRejection {
+    pub account_id: String,
+    /// Another PC that had the account's token out at the time, if any.
+    pub in_use_on: Option<String>,
+}
+
 impl Engine {
     pub fn new(host: Box<dyn Host>, store: Store) -> Self {
         Engine { host, store }
@@ -210,7 +218,27 @@ impl Engine {
     /// The Epic account PlayerTwo last switched to whose sign-in the launcher
     /// never confirmed — i.e. its saved token was rejected. Drives the UI warning.
     pub fn epic_unconfirmed(&self) -> Option<String> {
-        crate::switcher::epic::unconfirmed_switch(&*self.host)
+        let rejected = crate::switcher::epic::unconfirmed_switch(&*self.host)?;
+        // The token was never signed in with, so this PC isn't really holding the
+        // account; don't keep warning other PCs off it.
+        crate::switcher::epic::release(&*self.host, &self.store, &rejected);
+        Some(rejected)
+    }
+
+    /// Like [`Self::epic_unconfirmed`], plus the other PC that had the account's
+    /// token out when we switched to it, if any — the likely reason it was rejected.
+    pub fn epic_rejection(&self) -> Option<EpicRejection> {
+        let account_id = self.epic_unconfirmed()?;
+        Some(EpicRejection {
+            account_id,
+            in_use_on: crate::switcher::epic::pending_displaced_from(&*self.host),
+        })
+    }
+
+    /// Another PC sharing this store that has `account_id`'s Epic token out right
+    /// now. Switching to it here would plant a token Epic has already retired.
+    pub fn epic_in_use_elsewhere(&self, account_id: &str) -> Option<crate::switcher::epic::InUse> {
+        crate::switcher::epic::in_use_elsewhere(&*self.host, &self.store, account_id)
     }
 
     /// Save `account_id`'s live token, unless the live login is an unconfirmed
@@ -269,6 +297,8 @@ impl Engine {
         if let Some(current) = current.filter(|c| c != account_id) {
             if self.store.list_accounts("epic")?.iter().any(|a| a.id == current) {
                 self.capture_epic_if_trustworthy(&current)?;
+                // Its fresh token is saved: other PCs may use it again.
+                crate::switcher::epic::release(&*self.host, &self.store, &current);
             }
         }
         crate::switcher::epic::switch(&*self.host, &self.store, account_id)?;
@@ -290,6 +320,7 @@ impl Engine {
         if let Some(id) = self.epic_current() {
             if self.store.list_accounts("epic")?.iter().any(|a| a.id == id) {
                 self.capture_epic(&id)?;
+                crate::switcher::epic::release(&*self.host, &self.store, &id);
             }
         }
         crate::switcher::epic::clear(&*self.host)?;
@@ -1175,5 +1206,85 @@ mod tests {
         assert!(!out.already_active);
         let ini_txt = std::fs::read_to_string(&ini).unwrap();
         assert!(ini_txt.contains(&format!("Data={a_token}")));
+    }
+
+    /// Launchers that keep their config under `Config\Windows` instead of
+    /// `WindowsEditor` must get the token in the file they actually read.
+    #[test]
+    fn epic_uses_whichever_config_folder_the_launcher_has() {
+        let tmp = TempDir::new("epicwin");
+        let lad = tmp.path.join("lad");
+        let root = tmp.path.join("store");
+        let host = StubHost::new().with_var("LocalAppData", &lad.to_string_lossy());
+        let ini = lad
+            .join("EpicGamesLauncher")
+            .join("Saved")
+            .join("Config")
+            .join("Windows")
+            .join("GameUserSettings.ini");
+        std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+        let live = "l".repeat(600);
+        std::fs::write(&ini, format!("[Other]
+K=V
+[RememberMe]
+Enable=True
+Data={live}
+")).unwrap();
+        host.set_registry(EPIC_IDS_KEY, "AccountId", "idA");
+
+        let engine = engine_at(&host, &root);
+        engine.store().upsert_account("epic", acct("idA")).unwrap();
+        engine.store().upsert_account("epic", acct("idB")).unwrap();
+        let b_token = "b".repeat(700);
+        seed_epic_token(&root, "idB", &b_token);
+
+        engine.switch_epic(&epic_plat(), "idB", false).unwrap();
+
+        assert_eq!(saved_epic_token(&root, "idA"), live, "outgoing token read from Windows\\");
+        let txt = std::fs::read_to_string(&ini).unwrap();
+        assert!(txt.contains(&format!("Data={b_token}")), "token written to Windows\\");
+        assert!(txt.contains("K=V"));
+        assert!(!epic_ini_path(&lad).exists(), "no stray WindowsEditor file created");
+    }
+
+    /// Two PCs sharing one store: while PC1 is signed in as an account, PC2 is
+    /// warned its copy of the token is stale, and the warning lifts once PC1
+    /// switches away and saves the fresh one.
+    #[test]
+    fn epic_marks_account_in_use_across_pcs() {
+        let a_token = "a".repeat(600);
+        let (tmp, pc1, root, _ini) = epic_fixture("epicinuse", "idA", &a_token);
+        let pc1 = pc1.with_var("COMPUTERNAME", "PC1");
+        let lad2 = tmp.path.join("lad2");
+        let pc2 = StubHost::new()
+            .with_var("LocalAppData", &lad2.to_string_lossy())
+            .with_var("COMPUTERNAME", "PC2");
+
+        let e1 = engine_at(&pc1, &root);
+        let e2 = engine_at(&pc2, &root);
+        for id in ["idA", "idB"] {
+            e1.store().upsert_account("epic", acct(id)).unwrap();
+        }
+        seed_epic_token(&root, "idB", &"b".repeat(700));
+
+        // PC1 saves A while signed in: A is now PC1's.
+        e1.capture_epic("idA").unwrap();
+        assert!(e1.epic_in_use_elsewhere("idA").is_none(), "not 'elsewhere' to its own PC");
+        assert_eq!(e2.epic_in_use_elsewhere("idA").map(|u| u.machine).as_deref(), Some("PC1"));
+
+        // PC2 switches to A anyway; the launcher rejects the retired token.
+        e2.switch_epic(&epic_plat(), "idA", false).unwrap();
+        let rejected = e2.epic_rejection().expect("switch never confirmed");
+        assert_eq!(rejected.account_id, "idA");
+        assert_eq!(rejected.in_use_on.as_deref(), Some("PC1"));
+
+        // PC2's own failed claim is dropped, so PC1 isn't warned off its account.
+        assert!(e1.epic_in_use_elsewhere("idA").is_none());
+
+        // PC1 re-saves A, then switches away: its claim is released for everyone.
+        e1.capture_epic("idA").unwrap();
+        e1.switch_epic(&epic_plat(), "idB", false).unwrap();
+        assert!(e2.epic_in_use_elsewhere("idA").is_none());
+        assert_eq!(e2.epic_in_use_elsewhere("idB").map(|u| u.machine).as_deref(), Some("PC1"));
     }
 }

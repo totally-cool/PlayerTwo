@@ -84,6 +84,7 @@ pub fn run() {
             commands::renew_active_tokens,
             commands::epic_token_saved_at,
             commands::epic_unconfirmed_switch,
+            commands::epic_in_use_elsewhere,
             commands::update_account,
             commands::forget_account,
             commands::get_data_dir,

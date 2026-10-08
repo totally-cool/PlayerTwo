@@ -97,6 +97,14 @@ being treated as "no accounts". Anything describing the *local* machine's live l
 state — such as Epic's pending-switch record — deliberately stays out of the shared
 store, since it isn't true for the other PCs pointing at it.
 
+Epic on several PCs: Epic retires a login token once a PC signs in with it, so the
+copy in a shared store is only good until the PC using that account switches away
+and saves the replacement. PlayerTwo records which PC has an Epic account signed in
+(`in_use.json` in the account's folder) and asks before switching to it anywhere
+else; if a switch is rejected anyway, the warning names the PC that had it. It also
+writes Epic's token into whichever `Saved\Config\<folder>\GameUserSettings.ini` the
+installed launcher uses (`WindowsEditor` or `Windows`, depending on the build).
+
 ## Install
 
 **⬇ [Download the latest release](https://github.com/totally-cool/PlayerTwo/releases/latest)** — grab

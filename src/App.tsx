@@ -347,6 +347,14 @@ export default function App() {
   // Epic discards a RememberMe token it no longer accepts without telling anyone,
   // so this is the only way the user finds out retrying is pointless.
   const [rejectedLogin, setRejectedLogin] = useState<Record<string, boolean>>({});
+  // An Epic switch held for confirmation because another PC sharing the store
+  // has that account signed in (its saved token has been retired).
+  const [inUseConfirm, setInUseConfirm] = useState<{
+    platformId: string;
+    acc: Account;
+    machine: string;
+    since: number;
+  } | null>(null);
   const stepTimers = useRef<Record<string, number[]>>({});
   // Epic token freshness: accountId -> unix seconds the token was last saved.
   const [epicTokenAt, setEpicTokenAt] = useState<Record<string, number | null>>({});
@@ -474,7 +482,7 @@ export default function App() {
       if (switchSeq.current !== seq) return;
       try {
         const rejected = await api.epicUnconfirmedSwitch();
-        if (rejected !== expectedId || switchSeq.current !== seq) return;
+        if (rejected?.account_id !== expectedId || switchSeq.current !== seq) return;
         const key = `${platformId}:${expectedId}`;
         setRejectedLogin((prev) => ({ ...prev, [key]: true }));
         // Undo the optimistic highlight: this account is not actually active.
@@ -482,7 +490,9 @@ export default function App() {
           prev[platformId] === expectedId ? { ...prev, [platformId]: null } : prev,
         );
         setToast({
-          msg: "Epic rejected this saved login — it has expired. Sign in to Epic by hand once, then use Refresh login.",
+          msg: rejected.in_use_on
+            ? `Epic rejected this saved login — it was in use on ${rejected.in_use_on}, which retired it. Switch away from it on ${rejected.in_use_on} (or sign in to Epic here by hand), then try again.`
+            : "Epic rejected this saved login — it has expired. Sign in to Epic by hand once, then use Refresh login.",
           sev: "error",
         });
       } catch {
@@ -551,10 +561,25 @@ export default function App() {
     delete stepTimers.current[key];
   }, []);
 
-  const onSwitch = async (platformId: string, acc: Account) => {
+  const onSwitch = async (platformId: string, acc: Account, force = false) => {
     const key = `${platformId}:${acc.id}`;
     // Ignore repeat clicks while this card is already switching.
     if (switchStep[key]) return;
+
+    // Another PC sharing the store has this Epic account signed in, so the token
+    // saved here has been retired and the launcher would silently reject it.
+    // Ask first; the check is advisory, so a failure just proceeds.
+    if (platformId === "epic" && !force) {
+      try {
+        const inUse = await api.epicInUseElsewhere(acc.id);
+        if (inUse) {
+          setInUseConfirm({ platformId, acc, ...inUse });
+          return;
+        }
+      } catch {
+        /* fall through to the switch */
+      }
+    }
 
     // Show staged progress on the clicked card. The backend switch is a single
     // blocking call, so we advance the labels on a timer as honest feedback and
@@ -1272,6 +1297,35 @@ export default function App() {
           </Box>
         </Box>
       </Box>
+
+      <Dialog open={!!inUseConfirm} onClose={() => setInUseConfirm(null)} maxWidth="xs">
+        <DialogTitle>Signed in on {inUseConfirm?.machine}</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {inUseConfirm?.acc.display_name} was switched to on {inUseConfirm?.machine}{" "}
+            {inUseConfirm ? relativeTime(inUseConfirm.since) : ""} and is still in use there. Epic retires the saved
+            login once it's used, so switching here will most likely land on Epic's sign-in screen.
+          </DialogContentText>
+          <DialogContentText sx={{ mt: 1.5 }}>
+            Switch to another account on {inUseConfirm?.machine} first — that saves a fresh login
+            for every PC. If {inUseConfirm?.machine} is off or no longer uses PlayerTwo, switch anyway
+            and sign in by hand once.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setInUseConfirm(null)}>Cancel</Button>
+          <Button
+            color="warning"
+            onClick={() => {
+              const c = inUseConfirm;
+              setInUseConfirm(null);
+              if (c) onSwitch(c.platformId, c.acc, true);
+            }}
+          >
+            Switch anyway
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <NewProfileDialog
         open={!!newProfile}

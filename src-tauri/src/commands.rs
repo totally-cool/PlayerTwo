@@ -3,7 +3,8 @@
 //! Each command builds an [`Engine`] for the currently-configured data dir,
 //! does its work, and returns plain serializable data / `Result<_, String>`.
 
-use crate::switcher::engine::{Engine, SwitchOutcome};
+use crate::switcher::engine::{Engine, EpicRejection, SwitchOutcome};
+use crate::switcher::epic::InUse;
 use crate::switcher::model::{Account, UniqueId};
 use crate::switcher::settings::Settings;
 use crate::switcher::store::Store;
@@ -292,15 +293,27 @@ pub async fn epic_token_saved_at(
 }
 
 /// The Epic account PlayerTwo last switched to whose sign-in the launcher never
-/// confirmed, i.e. whose saved token Epic rejected as expired. `None` when the
-/// last switch took. The UI polls this after switching so a silently-discarded
-/// token surfaces as a warning instead of looking like a success.
+/// confirmed, i.e. whose saved token Epic rejected as expired — plus the other PC
+/// that had it out at the time, if any. `None` when the last switch took. The UI
+/// polls this after switching so a silently-discarded token surfaces as a warning
+/// instead of looking like a success.
 #[tauri::command]
 pub async fn epic_unconfirmed_switch(
     state: tauri::State<'_, AppState>,
-) -> CmdResult<Option<String>> {
+) -> CmdResult<Option<EpicRejection>> {
     let dir = state.data_dir.lock().unwrap().clone();
-    run_engine(dir, move |engine| Ok(engine.epic_unconfirmed())).await
+    run_engine(dir, move |engine| Ok(engine.epic_rejection())).await
+}
+
+/// Another PC sharing the store that currently has this Epic account's token out.
+/// The UI asks before switching, since the copy saved here has been retired.
+#[tauri::command]
+pub async fn epic_in_use_elsewhere(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+) -> CmdResult<Option<InUse>> {
+    let dir = state.data_dir.lock().unwrap().clone();
+    run_engine(dir, move |engine| Ok(engine.epic_in_use_elsewhere(&account_id))).await
 }
 
 /// The unique id of the account currently logged in on the system, if detectable.

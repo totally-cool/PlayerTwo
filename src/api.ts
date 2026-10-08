@@ -37,6 +37,20 @@ export interface SwitchOutcome {
   message: string;
 }
 
+/** Another PC sharing the store that has an Epic account's token checked out. */
+export interface EpicInUse {
+  machine: string;
+  /** Unix seconds. */
+  since: number;
+}
+
+/** An Epic switch whose saved token the launcher rejected. */
+export interface EpicRejection {
+  account_id: string;
+  /** Another PC that had the account's token out at the time, if any. */
+  in_use_on: string | null;
+}
+
 export interface AddResult {
   exists: boolean;
   account: Account;
@@ -72,7 +86,14 @@ export const api = {
    * signed in as — an expired token Epic silently discarded. `null` when the last
    * switch took.
    */
-  epicUnconfirmedSwitch: () => invoke<string | null>("epic_unconfirmed_switch"),
+  epicUnconfirmedSwitch: () => invoke<EpicRejection | null>("epic_unconfirmed_switch"),
+
+  /**
+   * Another PC sharing the store that has this Epic account signed in right now.
+   * Epic retires a token once it's used, so the copy saved here won't sign in.
+   */
+  epicInUseElsewhere: (accountId: string) =>
+    invoke<EpicInUse | null>("epic_in_use_elsewhere", { accountId }),
 
   addCurrentAccount: (platform: string, displayName: string) =>
     invoke<AddResult>("add_current_account", { platform, displayName }),
