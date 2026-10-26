@@ -278,8 +278,14 @@ impl Engine {
         // "Already active" needs a live token as well as a matching `AccountId`:
         // the registry keeps naming an account after the launcher has signed out
         // of it, and short-circuiting there would leave the user stuck at a
-        // sign-in screen with no way to re-apply their saved login.
-        if current.as_deref() == Some(account_id) && crate::switcher::epic::has_live_token(&*self.host) {
+        // sign-in screen with no way to re-apply their saved login. The live token
+        // must also actually be this account's: after a rejected switch to B the
+        // registry still names A while B's dead token sits in the INI, and
+        // "already active" would relaunch the launcher with that dead token
+        // instead of putting A's saved login back.
+        let live_token_is_ours = crate::switcher::epic::has_live_token(&*self.host)
+            && self.epic_unconfirmed().map_or(true, |planted| planted == account_id);
+        if current.as_deref() == Some(account_id) && live_token_is_ours {
             let launched = self.maybe_launch(plat, auto_start)?;
             return Ok(SwitchOutcome {
                 switched: false,
@@ -1206,6 +1212,38 @@ mod tests {
         assert!(!out.already_active);
         let ini_txt = std::fs::read_to_string(&ini).unwrap();
         assert!(ini_txt.contains(&format!("Data={a_token}")));
+    }
+
+    /// After the launcher rejects a switch to B, the registry still names A while
+    /// B's dead token sits in the INI. Switching back to A must put A's saved
+    /// token back, not report "already active" and relaunch with B's.
+    #[test]
+    fn epic_switching_back_after_rejected_switch_reapplies_the_token() {
+        let a_token = "a".repeat(600);
+        let b_token = "b".repeat(700);
+        let (_tmp, host, root, ini) = epic_fixture("epicback", "idA", &a_token);
+
+        let engine = engine_at(&host, &root);
+        engine.store().upsert_account("epic", acct("idA")).unwrap();
+        engine.store().upsert_account("epic", acct("idB")).unwrap();
+        seed_epic_token(&root, "idA", &a_token);
+        seed_epic_token(&root, "idB", &b_token);
+
+        // Switch to B; the launcher never signs in, so `AccountId` stays on A.
+        engine.switch_epic(&epic_plat(), "idB", false).unwrap();
+        assert_eq!(engine.epic_unconfirmed().as_deref(), Some("idB"));
+
+        let out = engine.switch_epic(&epic_plat(), "idA", false).unwrap();
+        assert!(out.switched, "A's login must be re-applied, not reported already-active");
+        assert!(!out.already_active);
+        let ini_txt = std::fs::read_to_string(&ini).unwrap();
+        assert!(ini_txt.contains(&format!("Data={a_token}")));
+        assert!(!ini_txt.contains(&b_token));
+        // A's saved token was never overwritten with B's.
+        assert_eq!(saved_epic_token(&root, "idA"), a_token);
+        // The record now describes A's planted token, and clears once the
+        // launcher confirms A (which the registry already does).
+        assert!(engine.epic_unconfirmed().is_none());
     }
 
     /// Launchers that keep their config under `Config\Windows` instead of
